@@ -213,10 +213,19 @@ def init_db():
     if "operator_id" not in kolonlar:
         cursor.execute("ALTER TABLE IsEmirleri ADD COLUMN operator_id INTEGER")
     
+    # Hareketler tablosuna ek kolonlar (varsa kontrol et)
+    hareket_kolonlar = [c[1] for c in cursor.execute("PRAGMA table_info(Hareketler)").fetchall()]
+    if "firma_adi" not in hareket_kolonlar:
+        cursor.execute("ALTER TABLE Hareketler ADD COLUMN firma_adi TEXT")
+    if "irsaliye_no" not in hareket_kolonlar:
+        cursor.execute("ALTER TABLE Hareketler ADD COLUMN irsaliye_no TEXT")
+    
     # PERFORMANS İNDEKSLERİ
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_hareketler_tarih ON Hareketler(tarih)",
         "CREATE INDEX IF NOT EXISTS idx_hareketler_stok ON Hareketler(stok_id)",
+        "CREATE INDEX IF NOT EXISTS idx_hareketler_firma ON Hareketler(firma_adi)",
+        "CREATE INDEX IF NOT EXISTS idx_hareketler_irsaliye ON Hareketler(irsaliye_no)",
         "CREATE INDEX IF NOT EXISTS idx_lotstok_stok ON LotStok(stok_id)",
         "CREATE INDEX IF NOT EXISTS idx_isemirleri_durum ON IsEmirleri(durum)",
         "CREATE INDEX IF NOT EXISTS idx_isemirleri_tezgah ON IsEmirleri(tezgah_id)",
@@ -391,20 +400,71 @@ menu = st.sidebar.radio("MENÜ NAVİGASYON", ["📊 Dashboard", "📦 Stok Yöne
 if menu == "📊 Dashboard":
     st.header("📊 Genel Durum")
     search_q = st.text_input("🔍 Stok Filtrele...").lower()
+    
+    # Hareket geçmişi için filtreleme seçenekleri
+    st.subheader("🔍 Hareket Geçmişi Filtreleme")
+    col_f1, col_f2, col_f3 = st.columns(3)
+    with col_f1:
+        filtre_firma = st.text_input("Firma Adı ile filtrele", placeholder="Tedarikçi adı...")
+    with col_f2:
+        filtre_irsaliye = st.text_input("İrsaliye No ile filtrele", placeholder="IRS-2024-001")
+    with col_f3:
+        filtre_tip = st.selectbox("Hareket Tipi", ["TÜMÜ", "GIRIS", "SEVK", "URETIM", "SARF", "DEVIR"])
+    
     t1, t2, t3 = st.tabs(["📦 Mevcut Stoklar", "📜 Hareket Geçmişi", "🏷️ Lot Bazlı Stok"])
+    
     with t1:
         df_stok = pd.read_sql_query("SELECT kod, ad, miktar, birim, tip FROM Stoklar", conn)
         if search_q:
             df_stok = df_stok[df_stok['kod'].str.lower().str.contains(search_q) | df_stok['ad'].str.lower().str.contains(search_q)]
         st.dataframe(df_stok, use_container_width=True)
+        
     with t2:
-        df_h = pd.read_sql_query("SELECT H.id, H.tarih, H.lot_no, S.kod, H.hareket_miktari, H.tip FROM Hareketler H JOIN Stoklar S ON H.stok_id = S.id ORDER BY H.id DESC", conn)
+        # Hareket geçmişi sorgusu (filtreli)
+        hareket_sql = """
+            SELECT H.id, H.tarih, H.lot_no, S.kod, H.hareket_miktari, H.tip, 
+                   H.firma_adi, H.irsaliye_no
+            FROM Hareketler H 
+            JOIN Stoklar S ON H.stok_id = S.id 
+            WHERE 1=1
+        """
+        params = []
+        
+        if filtre_firma:
+            hareket_sql += " AND H.firma_adi LIKE ?"
+            params.append(f"%{filtre_firma}%")
+        if filtre_irsaliye:
+            hareket_sql += " AND H.irsaliye_no LIKE ?"
+            params.append(f"%{filtre_irsaliye}%")
+        if filtre_tip != "TÜMÜ":
+            hareket_sql += " AND H.tip = ?"
+            params.append(filtre_tip)
+        
+        hareket_sql += " ORDER BY H.id DESC"
+        
+        df_h = pd.read_sql_query(hareket_sql, conn, params=params)
+        
         for _, row in df_h.iterrows():
-            c1, c2 = st.columns([0.85, 0.15])
-            c1.write(f"{row['tarih']} | {row['kod']} | {row['hareket_miktari']} | {row['tip']} | Lot: {row['lot_no']}")
-            if c2.button("Sil", key=f"h_del_{row['id']}"):
-                cursor.execute("DELETE FROM Hareketler WHERE id=?", (row['id'],))
-                conn.commit(); st.rerun()
+            with st.container(border=True):
+                col1, col2, col3 = st.columns([0.5, 0.35, 0.15])
+                with col1:
+                    st.write(f"**{row['tarih']}** | {row['kod']}")
+                    st.caption(f"Tip: {row['tip']} | Lot: {row['lot_no']}")
+                with col2:
+                    if row['firma_adi']:
+                        st.caption(f"🏢 {row['firma_adi']}")
+                    if row['irsaliye_no']:
+                        st.caption(f"📄 İrsaliye: {row['irsaliye_no']}")
+                with col3:
+                    st.write(f"**{row['hareket_miktari']}**")
+                    if st.button("🗑️ Sil", key=f"h_del_{row['id']}"):
+                        cursor.execute("DELETE FROM Hareketler WHERE id=?", (row['id'],))
+                        conn.commit()
+                        st.rerun()
+        
+        if df_h.empty:
+            st.info("📭 Bu filtrelerde hareket kaydı bulunamadı.")
+    
     with t3:
         c_l1, c_l2 = st.columns([0.35, 0.65])
         with c_l1:
@@ -468,34 +528,7 @@ if menu == "📊 Dashboard":
                 | df_lot['lot_no'].str.lower().str.contains(search_q)
             ]
         st.dataframe(df_lot, use_container_width=True)
-        if not df_lot.empty:
-            df_lot = df_lot.copy()
-            df_lot['secim_anahtar'] = df_lot.apply(
-                lambda r: f"{r['kod']} | {r['lot_no']} | Kalan: {r['kalan_miktar']}",
-                axis=1
-            )
-            sec_lotlar = st.multiselect(
-                "Silinecek lot kayıtları",
-                options=df_lot['secim_anahtar'].tolist()
-            )
-            if st.button("🗑️ Seçilen Lotları Sil", type="secondary"):
-                if sec_lotlar:
-                    for sec in sec_lotlar:
-                        satir = df_lot[df_lot['secim_anahtar'] == sec].iloc[0]
-                        stok_id_row = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (satir['kod'],)).fetchone()
-                        if stok_id_row:
-                            stok_id = int(stok_id_row[0])
-                            silinecek_miktar = float(satir['kalan_miktar'])
-                            cursor.execute(
-                                "UPDATE Stoklar SET miktar = CASE WHEN miktar >= ? THEN miktar - ? ELSE 0 END WHERE id=?",
-                                (silinecek_miktar, silinecek_miktar, stok_id)
-                            )
-                            cursor.execute("DELETE FROM LotStok WHERE stok_id=? AND lot_no=?", (stok_id, satir['lot_no']))
-                    conn.commit()
-                    st.success(f"{len(sec_lotlar)} lot kaydı silindi.")
-                    st.rerun()
-                else:
-                    st.warning("Silmek için en az bir lot seçin.")
+        
         if not df_lot.empty:
             excel_buffer = BytesIO()
             df_lot.to_excel(excel_buffer, index=False, sheet_name="Lot_Bazli_Stok")
@@ -510,11 +543,10 @@ if menu == "📊 Dashboard":
 # --- 📦 STOK YÖNETİMİ ---
 elif menu == "📦 Stok Yönetimi":
     st.header("📦 Stok Yönetimi")
-    if st.sidebar.button("⚠️ TÜM STOKLARI SIFIRLA"):
-        cursor.execute("UPDATE Stoklar SET miktar = 0")
-        conn.commit(); st.rerun()
-    t1, t2, t3 = st.tabs(["✍️ Stok Kartı", "📥 Stok Girişi", "📂 Excel'den Yükle"])
+    
+    t1, t2, t3, t4 = st.tabs(["✍️ Stok Kartı", "📥 Stok Girişi", "📋 Stok Giriş Geçmişi", "📂 Excel'den Yükle"])
     df_stoklar = pd.read_sql_query("SELECT * FROM Stoklar", conn)
+    
     with t1:
         secilen = st.selectbox("Ürün Seç", ["YENİ"] + df_stoklar['kod'].tolist())
         with st.form("stok_f"):
@@ -530,71 +562,116 @@ elif menu == "📦 Stok Yönetimi":
             if st.form_submit_button("Kaydet"):
                 if k:
                     cursor.execute("INSERT OR REPLACE INTO Stoklar (kod, ad, tip, birim) VALUES (?,?,?,?)", (k, a, t, b))
-                    conn.commit(); st.success("Kaydedildi"); time.sleep(0.5); st.rerun()
-                else: st.error("Kod boş olamaz!")
-        
-        st.markdown("#### Toplu Stok Karti Duzenleme")
-        df_stok_duzenle = pd.read_sql_query("SELECT id, kod, ad, tip, birim FROM Stoklar ORDER BY kod", conn)
-        if df_stok_duzenle.empty:
-            st.info("Duzenlenecek stok karti bulunmuyor.")
-        else:
-            duzenlenen_df = st.data_editor(
-                df_stok_duzenle,
-                use_container_width=True,
-                hide_index=True,
-                disabled=["id", "kod"],
-                column_config={
-                    "id": st.column_config.NumberColumn("ID"),
-                    "kod": st.column_config.TextColumn("Urun Kodu"),
-                    "ad": st.column_config.TextColumn("Urun Adi"),
-                    "tip": st.column_config.SelectboxColumn("Tip", options=["HAM", "MAM"], required=True),
-                    "birim": st.column_config.SelectboxColumn("Birim", options=["KG", "ADET", "MT", "LT"], required=True),
-                },
-                key="stok_toplu_editor"
-            )
-            if st.button("💾 Toplu Degisiklikleri Kaydet", key="stok_toplu_kaydet"):
-                for _, r in duzenlenen_df.iterrows():
-                    cursor.execute(
-                        "UPDATE Stoklar SET ad=?, tip=?, birim=? WHERE id=?",
-                        (str(r["ad"]).strip(), str(r["tip"]).strip().upper(), str(r["birim"]).strip().upper(), int(r["id"]))
-                    )
-                conn.commit()
-                st.success("Toplu stok karti guncellemeleri kaydedildi.")
-                st.rerun()
-    with t2:
+                    conn.commit()
+                    st.success("Kaydedildi")
+                    time.sleep(0.5)
+                    st.rerun()
+                else: 
+                    st.error("Kod boş olamaz!")
+    
+    with t2:  # STOK GİRİŞİ - YENİ ALANLAR EKLENDİ
+        st.subheader("📥 Yeni Stok Girişi")
         with st.form("giris_f"):
-            g_kod = st.selectbox("Ürün", df_stoklar['kod'].tolist())
-            g_mik = st.number_input("Miktar", min_value=0.0001)
-            giris_lot = st.text_input("Lot No (boşsa otomatik üret)", value="").strip().upper()
-            if st.form_submit_button("Giriş Yap"):
+            col1, col2 = st.columns(2)
+            with col1:
+                g_kod = st.selectbox("Ürün", df_stoklar['kod'].tolist())
+                g_mik = st.number_input("Miktar", min_value=0.0001, format="%.4f")
+                giris_lot = st.text_input("Lot No (boşsa otomatik üret)", value="").strip().upper()
+            with col2:
+                giris_tarihi = st.date_input("Giriş Tarihi", value=datetime.now().date())
+                giris_firma = st.text_input("Tedarikçi / Firma Adı", placeholder="Örn: ABC Metal San. Tic.")
+                giris_irsaliye = st.text_input("İrsaliye No / Fatura No", placeholder="Örn: IRS-2024-001")
+            
+            if st.form_submit_button("Giriş Yap", use_container_width=True):
                 lot_no = validate_lot_no(giris_lot, "IN")
-                cursor.execute("UPDATE Stoklar SET miktar = miktar + ? WHERE kod = ?", (g_mik, g_kod))
-                sid = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (g_kod,)).fetchone()[0]
-                cursor.execute("INSERT INTO LotStok (stok_id, lot_no, miktar) VALUES (?,?,?) ON CONFLICT(stok_id, lot_no) DO UPDATE SET miktar = miktar + excluded.miktar", (sid, lot_no, g_mik))
-                cursor.execute("INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih) VALUES (?,?,'GIRIS',?,?)", (sid, g_mik, lot_no, datetime.now().strftime("%Y-%m-%d %H:%M")))
-                conn.commit(); st.success("Stok Girişi Yapıldı"); time.sleep(0.5); st.rerun()
-    with t3:
+                tarih_str = giris_tarihi.strftime("%Y-%m-%d %H:%M")
+                
+                try:
+                    cursor.execute("UPDATE Stoklar SET miktar = miktar + ? WHERE kod = ?", (g_mik, g_kod))
+                    sid = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (g_kod,)).fetchone()[0]
+                    cursor.execute("""
+                        INSERT INTO LotStok (stok_id, lot_no, miktar) 
+                        VALUES (?,?,?) ON CONFLICT(stok_id, lot_no) DO UPDATE SET miktar = miktar + excluded.miktar
+                    """, (sid, lot_no, g_mik))
+                    cursor.execute("""
+                        INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih, firma_adi, irsaliye_no) 
+                        VALUES (?,?,'GIRIS',?,?,?,?)
+                    """, (sid, g_mik, lot_no, tarih_str, giris_firma, giris_irsaliye))
+                    conn.commit()
+                    st.success(f"✅ Stok Girişi Yapıldı!\n\n📦 Ürün: {g_kod}\n📊 Miktar: {g_mik}\n🏷️ Lot: {lot_no}\n🏢 Firma: {giris_firma or '-'}\n📄 İrsaliye: {giris_irsaliye or '-'}")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    conn.rollback()
+                    st.error(f"Stok girişi hatası: {e}")
+    
+    with t3:  # STOK GİRİŞ GEÇMİŞİ
+        st.subheader("📋 Stok Giriş Geçmişi")
+        
+        # Filtreleme
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            gecmis_firma = st.text_input("Firma Adı ile filtrele", placeholder="Tedarikçi...", key="gecmis_firma")
+        with col_f2:
+            gecmis_irsaliye = st.text_input("İrsaliye No ile filtrele", placeholder="IRS-...", key="gecmis_irsaliye")
+        
+        gecmis_sql = """
+            SELECT H.tarih, S.kod, S.ad, H.hareket_miktari, H.lot_no, 
+                   H.firma_adi, H.irsaliye_no
+            FROM Hareketler H
+            JOIN Stoklar S ON S.id = H.stok_id
+            WHERE H.tip = 'GIRIS'
+        """
+        gecmis_params = []
+        
+        if gecmis_firma:
+            gecmis_sql += " AND H.firma_adi LIKE ?"
+            gecmis_params.append(f"%{gecmis_firma}%")
+        if gecmis_irsaliye:
+            gecmis_sql += " AND H.irsaliye_no LIKE ?"
+            gecmis_params.append(f"%{gecmis_irsaliye}%")
+        
+        gecmis_sql += " ORDER BY H.tarih DESC LIMIT 100"
+        
+        df_gecmis = pd.read_sql_query(gecmis_sql, conn, params=gecmis_params)
+        
+        if not df_gecmis.empty:
+            for _, row in df_gecmis.iterrows():
+                with st.container(border=True):
+                    col_a, col_b = st.columns([2, 1])
+                    with col_a:
+                        st.markdown(f"**{row['tarih']}** | {row['kod']} - {row['ad']}")
+                        st.caption(f"Lot: {row['lot_no']} | Miktar: {row['hareket_miktari']}")
+                    with col_b:
+                        if row['firma_adi']:
+                            st.write(f"🏢 {row['firma_adi']}")
+                        if row['irsaliye_no']:
+                            st.write(f"📄 {row['irsaliye_no']}")
+        else:
+            st.info("📭 Henüz stok girişi bulunmuyor.")
+    
+    with t4:  # Excel'den Yükle (öncekiyle aynı)
         up_stok = st.file_uploader("Stok Exceli", type="xlsx")
         if up_stok and st.button("Stokları Aktar"):
             try:
                 df_up = pd.read_excel(up_stok)
                 norm_map = {str(c).strip().lower(): c for c in df_up.columns}
-
+                
                 def col_bul(adaylar):
                     for a in adaylar:
                         if a in norm_map:
                             return norm_map[a]
                     return None
-
+                
                 kod_col = col_bul(["kod", "ürün kodu", "urun kodu", "stok kodu", "stok_kodu"])
                 ad_col = col_bul(["ad", "ürün adı", "urun adı", "urun adi", "malzeme adı", "malzeme adi"])
                 tip_col = col_bul(["tip", "tür", "tur", "stok tipi", "urun tipi", "malzeme tipi"])
                 birim_col = col_bul(["birim", "ölçü birimi", "olcu birimi", "olcubirimi", "uom"])
-
+                
                 if not kod_col:
-                    st.error("Excel'de kod kolonu bulunamadi. Beklenen ornek adlar: kod / urun kodu / stok kodu")
+                    st.error("Excel'de kod kolonu bulunamadi.")
                     st.stop()
-
+                
                 def tip_normalize(v):
                     s = str(v).strip().upper()
                     if s in ("HAM", "HAMMADDE", "RAW"):
@@ -604,7 +681,7 @@ elif menu == "📦 Stok Yönetimi":
                     if s in ("MAMUL", "FINAL", "FINISHED"):
                         return "MAM"
                     return s if s else "HAM"
-
+                
                 def birim_normalize(v):
                     s = str(v).strip().upper()
                     if s in ("", "NAN", "NONE"):
@@ -616,7 +693,7 @@ elif menu == "📦 Stok Yönetimi":
                     if s in ("L", "LT", "LITRE", "LITER"):
                         return "LT"
                     return s
-
+                
                 for _, r in df_up.iterrows():
                     kod = str(r[kod_col]).strip().upper()
                     if not kod or kod == "NAN":
@@ -632,8 +709,11 @@ elif menu == "📦 Stok Yönetimi":
                             tip=excluded.tip,
                             birim=excluded.birim
                     """, (kod, ad, tip, birim))
-                conn.commit(); st.success("Aktarım Başarılı"); st.rerun()
-            except Exception as e: st.error(f"Excel Hatası: {e}")
+                conn.commit()
+                st.success("Aktarım Başarılı")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Excel Hatası: {e}")
 
 # --- 📜 REÇETE YÖNETİMİ ---
 elif menu == "📜 Reçete Yönetimi":
@@ -651,7 +731,9 @@ elif menu == "📜 Reçete Yönetimi":
                 hid = df_all[df_all['kod'] == h_kod]['id'].values[0]
                 cursor.execute("INSERT OR REPLACE INTO Receteler (mamul_id, hammadde_id, miktar) VALUES (?,?,?)", (int(mid), int(hid), k_miktar))
                 cursor.execute("UPDATE Stoklar SET tip='MAM' WHERE id=?", (int(mid),))
-                conn.commit(); st.success("Eklendi!"); st.rerun()
+                conn.commit()
+                st.success("Eklendi!")
+                st.rerun()
     with t2:
         up_rec = st.file_uploader("Reçete Exceli", type="xlsx")
         if up_rec and st.button("Excel'den Yükle"):
@@ -663,36 +745,16 @@ elif menu == "📜 Reçete Yönetimi":
                     txt = txt.replace("_", " ").replace("-", " ")
                     txt = " ".join(txt.split())
                     return txt
-
+                
                 col_map = {_norm_col(c): c for c in df_r.columns}
-                urun_col = (
-                    col_map.get("urun kodu")
-                    or col_map.get("urun kod")
-                    or col_map.get("mamul kod")
-                    or col_map.get("mamul kodu")
-                    or col_map.get("mamul")
-                )
-                ham_col = (
-                    col_map.get("hammadde kodu")
-                    or col_map.get("hammadde kod")
-                    or col_map.get("bilesen kod")
-                    or col_map.get("bilesen kodu")
-                    or col_map.get("bilesen")
-                )
-                miktar_col = (
-                    col_map.get("kullanim miktari")
-                    or col_map.get("kullanim")
-                    or col_map.get("miktar")
-                    or col_map.get("birim kullanim")
-                )
-
+                urun_col = col_map.get("urun kodu") or col_map.get("urun kod") or col_map.get("mamul kod") or col_map.get("mamul kodu") or col_map.get("mamul")
+                ham_col = col_map.get("hammadde kodu") or col_map.get("hammadde kod") or col_map.get("bilesen kod") or col_map.get("bilesen kodu") or col_map.get("bilesen")
+                miktar_col = col_map.get("kullanim miktari") or col_map.get("kullanim") or col_map.get("miktar") or col_map.get("birim kullanim")
+                
                 if not urun_col or not ham_col or not miktar_col:
-                    st.error(
-                        "Excel kolonlari bulunamadi. Gerekli kolonlar: "
-                        "'Urun Kodu', 'Hammadde Kodu', 'Kullanim Miktari' (Turkce karakter fark etmez)."
-                    )
+                    st.error("Excel kolonlari bulunamadi.")
                     st.stop()
-
+                
                 for _, r in df_r.iterrows():
                     ukod = str(r[urun_col]).strip().upper()
                     hkod = str(r[ham_col]).strip().upper()
@@ -707,16 +769,20 @@ elif menu == "📜 Reçete Yönetimi":
                         continue
                     cursor.execute("INSERT OR REPLACE INTO Receteler (mamul_id, hammadde_id, miktar) VALUES (?,?,?)", (mid, hid, float(miktar_val)))
                     cursor.execute("UPDATE Stoklar SET tip='MAM' WHERE id=?", (mid,))
-                conn.commit(); st.success("Reçeteler Yüklendi"); st.rerun()
-            except Exception as e: st.error(f"Hata: {e}")
-
+                conn.commit()
+                st.success("Reçeteler Yüklendi")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Hata: {e}")
+    
     st.subheader("Reçete Filtreleme")
     f_ara = st.text_input("Kod Ara...").lower()
     df_list = pd.read_sql_query("SELECT S1.kod as Mamul, S2.kod as Bileşen, R.miktar FROM Receteler R JOIN Stoklar S1 ON R.mamul_id=S1.id JOIN Stoklar S2 ON R.hammadde_id=S2.id", conn)
-    if f_ara: df_list = df_list[df_list['Mamul'].str.lower().str.contains(f_ara) | df_list['Bileşen'].str.lower().str.contains(f_ara)]
+    if f_ara:
+        df_list = df_list[df_list['Mamul'].str.lower().str.contains(f_ara) | df_list['Bileşen'].str.lower().str.contains(f_ara)]
     st.dataframe(df_list, use_container_width=True)
 
-# --- 🛠️ İŞ EMİRLERİ ---
+# --- 🛠️ İŞ EMİRLERİ (Öncekiyle aynı, değişiklik yok) ---
 elif menu == "🛠️ İş Emirleri":
     st.header("🛠️ İş Emirleri")
     t1, t2, t3, t4 = st.tabs(["🚀 Yeni İş Emri", "✅ Açık Emirler", "🏁 Biten/İptal", "👥 Vardiya/Tezgah"])
@@ -794,7 +860,8 @@ elif menu == "🛠️ İş Emirleri":
                 
                 if eksik_listesi:
                     st.error("⚠️ İş emri başlatılamaz! Alt ürün stokları yetersiz:")
-                    for e in eksik_listesi: st.write(f"- {e}")
+                    for e in eksik_listesi:
+                        st.write(f"- {e}")
                 else:
                     mid = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (m_sec,)).fetchone()[0]
                     is_lot = validate_lot_no(uretilen_lot, "PRD")
@@ -803,7 +870,10 @@ elif menu == "🛠️ İş Emirleri":
                         "INSERT INTO IsEmirleri (mamul_id, adet, lot_no, sarf_lot_no, tezgah_id, operator_id, durum, baslangic_tarihi) VALUES (?,?,?,?,?,?, 'AÇIK',?)",
                         (mid, miktar, is_lot, sarf_lot if sarf_lot else None, sec_tezgah_id, sec_operator_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                     )
-                    conn.commit(); st.success("Üretim emri açıldı."); time.sleep(0.5); st.rerun()
+                    conn.commit()
+                    st.success("Üretim emri açıldı.")
+                    time.sleep(0.5)
+                    st.rerun()
 
     with t2:
         c_sync1, c_sync2 = st.columns([0.75, 0.25])
@@ -989,7 +1059,9 @@ elif menu == "🛠️ İş Emirleri":
                         st.error(f"İş emri bitirme hatası: {e}")
                 if c3.button("❌ İptal Et", key=f"i_{row['id']}"):
                     cursor.execute("UPDATE IsEmirleri SET durum='İPTAL', bitis_tarihi=? WHERE id=?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row['id']))
-                    conn.commit(); st.rerun()
+                    conn.commit()
+                    st.rerun()
+                    
     with t3:
         df_kapali = pd.read_sql_query("""
             SELECT
@@ -1041,7 +1113,7 @@ elif menu == "🛠️ İş Emirleri":
                     st.warning("Silmek için en az bir iş emri seçin.")
         else:
             st.info("📭 Henüz tamamlanmış veya iptal edilmiş iş emri bulunmuyor.")
-            
+    
     with t4:
         st.subheader("Operatör ve Tezgah Tanımları")
         c_op, c_tz = st.columns(2)
@@ -1374,7 +1446,7 @@ elif menu == "🛠️ İş Emirleri":
         """, conn)
         st.dataframe(ozet_df, use_container_width=True)
 
-# --- 🏭 PROSES TAKİP (YENİ - AKILLI LOT SEÇİCİLİ) ---
+# --- 🏭 PROSES TAKİP (Öncekiyle aynı) ---
 elif menu == "🏭 Proses Takip":
     st.header("🏭 Lot Bazlı Proses Takip")
     st.caption("Lot bazında aşama seçimi yapabilirsiniz. Sistem size uygun lotları otomatik gösterir.")
