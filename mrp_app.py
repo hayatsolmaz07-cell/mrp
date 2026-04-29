@@ -474,106 +474,113 @@ elif menu == "🛠️ İş Emirleri":
                             conn.rollback()
                             st.error(f"Hata: {e}")
                 
-                           if c2.button("✅ Bitir", key=f"b_{row['id']}"):
-                    try:
-                        uretilen_toplam = float(cursor.execute("SELECT COALESCE(SUM(miktar), 0) FROM UretimKayitlari WHERE is_emri_id=?", (int(row['id']),)).fetchone()[0])
-                        if uretilen_toplam <= 0:
-                            st.error("İş emri kapatılamaz: önce üretim kaydı girin.")
-                            st.stop()
-                        
-                        mid = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (row['kod'],)).fetchone()[0]
-                        
-                        # GÜVENLİ RECURSIVE FONKSİYON (derinlik sınırlı)
-                        hammaddeler = []
-                        ziyaret_edilenler = set()
-                        
-                        def hammadde_topla_güvenli(urun_id, miktar, derinlik=0):
-                            if derinlik > 10:
-                                st.warning(f"⚠️ Reçete çok derin ({derinlik} seviye), işlem durduruldu.")
-                                return
-                            if (urun_id, miktar) in ziyaret_edilenler:
-                                st.warning(f"⚠️ Reçetede döngü tespit edildi! (ID: {urun_id})")
-                                return
-                            ziyaret_edilenler.add((urun_id, miktar))
-                            
-                            recete = cursor.execute("""
-                                SELECT R.hammadde_id, R.miktar, S.tip
-                                FROM Receteler R
-                                JOIN Stoklar S ON S.id = R.hammadde_id
-                                WHERE R.mamul_id = ?
-                            """, (urun_id,)).fetchall()
-                            
-                            if not recete:
-                                return
-                            
-                            for hid, birim_miktar, tip in recete:
-                                toplam_gereken = birim_miktar * miktar
-                                if tip == 'MAM':
-                                    hammadde_topla_güvenli(hid, toplam_gereken, derinlik + 1)
-                                else:
-                                    bulundu = False
-                                    for hm in hammaddeler:
-                                        if hm['id'] == hid:
-                                            hm['gereken'] += toplam_gereken
-                                            bulundu = True
-                                            break
-                                    if not bulundu:
-                                        hammaddeler.append({'id': hid, 'gereken': toplam_gereken})
-                        
-                        hammadde_topla_güvenli(mid, uretilen_toplam)
-                        
-                        if not hammaddeler:
-                            st.warning("⚠️ Bu ürün için reçete tanımlı değil! Stok düşüşü yapılmadı.")
-                        else:
-                            st.info(f"📦 Toplam {len(hammaddeler)} farklı hammadde stoktan düşülecek:")
-                            
-                            for hm in hammaddeler:
-                                hm_id = hm['id']
-                                hm_gereken = hm['gereken']
-                                
-                                mevcut_stok = cursor.execute("SELECT COALESCE(miktar, 0) FROM Stoklar WHERE id=?", (hm_id,)).fetchone()[0]
-                                if mevcut_stok < hm_gereken:
-                                    st.warning(f"⚠️ Yetersiz stok! Gereken: {hm_gereken:.2f}, mevcut: {mevcut_stok:.2f}")
-                                    continue
-                                
-                                cursor.execute("UPDATE Stoklar SET miktar = miktar - ? WHERE id=?", (hm_gereken, hm_id))
-                                
-                                kalan = hm_gereken
-                                lot_satirlari = cursor.execute("""
-                                    SELECT id, lot_no, miktar FROM LotStok
-                                    WHERE stok_id=? AND miktar > 0
-                                    ORDER BY id
-                                """, (hm_id,)).fetchall()
-                                
-                                düşülen = 0
-                                for lot_id, lot_no, lot_miktar in lot_satirlari:
-                                    if kalan <= 0:
-                                        break
-                                    kullan = min(kalan, lot_miktar)
-                                    cursor.execute("UPDATE LotStok SET miktar = miktar - ? WHERE id=?", (kullan, lot_id))
-                                    cursor.execute("""
-                                        INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih)
-                                        VALUES (?,?,'SARF',?,?)
-                                    """, (hm_id, kullan, lot_no, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                                    kalan -= kullan
-                                    düşülen += kullan
-                                
-                                if düşülen > 0:
-                                    st.write(f"   ✓ {düşülen:.2f} birim düşüldü")
-                                if kalan > 0:
-                                    st.warning(f"   ⚠️ {kalan:.2f} birim düşülemedi (lot yetersiz)")
-                            
-                            st.success(f"✅ İş emri tamamlandı!")
-                        
-                        cursor.execute("UPDATE IsEmirleri SET durum='BİTTİ', bitis_tarihi=? WHERE id=?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row['id']))
-                        conn.commit()
-                        st.rerun()
-                        
-                    except Exception as e:
-                        conn.rollback()
-                        st.error(f"İş emri bitirme hatası: {e}")
+                # HAMMADDEDEN DÜŞME (KRİTİK KISIM)
+                if c2.button("✅ Bitir", key=f"b_{row['id']}"):
+    try:
+        uretilen_toplam = float(cursor.execute("SELECT COALESCE(SUM(miktar), 0) FROM UretimKayitlari WHERE is_emri_id=?", (int(row['id']),)).fetchone()[0])
+        if uretilen_toplam <= 0:
+            st.error("İş emri kapatılamaz: önce üretim kaydı girin.")
+            st.stop()
+        
+        mid = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (row['kod'],)).fetchone()[0]
+        
+        # GÜVENLİ RECURSIVE FONKSİYON (derinlik sınırlı)
+        hammaddeler = []
+        ziyaret_edilenler = set()  # Döngüsel reçeteleri tespit etmek için
+        
+        def hammadde_topla_güvenli(urun_id, miktar, derinlik=0):
+            # Derinlik sınırı (max 10 seviye)
+            if derinlik > 10:
+                st.warning(f"⚠️ Reçete çok derin ({derinlik} seviye), işlem durduruldu.")
+                return
+            
+            # Döngü kontrolü (A->B->A gibi)
+            if (urun_id, miktar) in ziyaret_edilenler:
+                st.warning(f"⚠️ Reçetede döngü tespit edildi! (ID: {urun_id})")
+                return
+            ziyaret_edilenler.add((urun_id, miktar))
+            
+            recete = cursor.execute("""
+                SELECT R.hammadde_id, R.miktar, S.tip
+                FROM Receteler R
+                JOIN Stoklar S ON S.id = R.hammadde_id
+                WHERE R.mamul_id = ?
+            """, (urun_id,)).fetchall()
+            
+            if not recete:
+                st.warning(f"⚠️ {urun_id} ID'li ürün için reçete bulunamadı!")
+                return
+            
+            for hid, birim_miktar, tip in recete:
+                toplam_gereken = birim_miktar * miktar
+                if tip == 'MAM':
+                    hammadde_topla_güvenli(hid, toplam_gereken, derinlik + 1)
+                else:
+                    # Aynı hammaddeyi topla (birleştir)
+                    bulundu = False
+                    for hm in hammaddeler:
+                        if hm['id'] == hid:
+                            hm['gereken'] += toplam_gereken
+                            bulundu = True
+                            break
+                    if not bulundu:
+                        hammaddeler.append({'id': hid, 'gereken': toplam_gereken})
+        
+        hammadde_topla_güvenli(mid, uretilen_toplam)
+        
+        if not hammaddeler:
+            st.warning("⚠️ Bu ürün için reçete tanımlı değil! Stok düşüşü yapılmadı.")
+        else:
+            st.info(f"📦 Toplam {len(hammaddeler)} farklı hammadde stoktan düşülecek:")
+            
+            for hm in hammaddeler:
+                hm_id = hm['id']
+                hm_gereken = hm['gereken']
                 
-
+                # Stok kontrolü
+                mevcut_stok = cursor.execute("SELECT COALESCE(miktar, 0) FROM Stoklar WHERE id=?", (hm_id,)).fetchone()[0]
+                if mevcut_stok < hm_gereken:
+                    st.warning(f"⚠️ Yetersiz stok! {hm_id} için gereken: {hm_gereken:.2f}, mevcut: {mevcut_stok:.2f}")
+                    continue
+                
+                # Ana stoktan düş
+                cursor.execute("UPDATE Stoklar SET miktar = miktar - ? WHERE id=?", (hm_gereken, hm_id))
+                
+                # Lot bazlı düşüş (FIFO)
+                kalan = hm_gereken
+                lot_satirlari = cursor.execute("""
+                    SELECT id, lot_no, miktar FROM LotStok
+                    WHERE stok_id=? AND miktar > 0
+                    ORDER BY id
+                """, (hm_id,)).fetchall()
+                
+                düşülen = 0
+                for lot_id, lot_no, lot_miktar in lot_satirlari:
+                    if kalan <= 0:
+                        break
+                    kullan = min(kalan, lot_miktar)
+                    cursor.execute("UPDATE LotStok SET miktar = miktar - ? WHERE id=?", (kullan, lot_id))
+                    cursor.execute("""
+                        INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih)
+                        VALUES (?,?,'SARF',?,?)
+                    """, (hm_id, kullan, lot_no, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    kalan -= kullan
+                    düşülen += kullan
+                
+                if düşülen > 0:
+                    st.write(f"   ✓ {hm_id} nolu hammadde: {düşülen:.2f} birim düşüldü")
+                if kalan > 0:
+                    st.warning(f"   ⚠️ {hm_id} için {kalan:.2f} birim düşülemedi (lot yetersiz)")
+            
+            st.success(f"✅ İş emri tamamlandı! {len(hammaddeler)} hammadde stoktan düşüldü.")
+        
+        cursor.execute("UPDATE IsEmirleri SET durum='BİTTİ', bitis_tarihi=? WHERE id=?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row['id']))
+        conn.commit()
+        st.rerun()
+        
+    except Exception as e:
+        conn.rollback()
+        st.error(f"İş emri bitirme hatası: {e}")
         st.info("💡 İpucu: Reçetelerinizde döngü olup olmadığını kontrol edin (A->B, B->A gibi)")
 
                 if c3.button("❌ İptal Et", key=f"i_{row['id']}"):
