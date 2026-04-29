@@ -1033,7 +1033,7 @@ elif menu == "🛠️ İş Emirleri":
                                 conn.rollback()
                                 st.error(f"Üretim kaydı hatası: {e}")
                if c2.button("✅ Bitir", key=f"b_{row['id']}"):
-    try:
+                  try:
         uretilen_toplam = float(cursor.execute("SELECT COALESCE(SUM(miktar), 0) FROM UretimKayitlari WHERE is_emri_id=?", (int(row['id']),)).fetchone()[0])
         if uretilen_toplam <= 0:
             st.error("İş emri kapatılamaz: önce üretim kaydı girin.")
