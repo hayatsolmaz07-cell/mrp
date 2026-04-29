@@ -1032,43 +1032,82 @@ elif menu == "🛠️ İş Emirleri":
                             except Exception as e:
                                 conn.rollback()
                                 st.error(f"Üretim kaydı hatası: {e}")
-                if c2.button("✅ Bitir", key=f"b_{row['id']}"):
-                    try:
-                        uretilen_toplam = float(cursor.execute("SELECT COALESCE(SUM(miktar), 0) FROM UretimKayitlari WHERE is_emri_id=?", (int(row['id']),)).fetchone()[0])
-                        if uretilen_toplam <= 0:
-                            st.error("İş emri kapatılamaz: önce üretim kaydı girin.")
-                            st.stop()
-                        
-                        # YARI MAMUL DESTEKLİ RECETE DÜŞÜŞÜ
-                        mid = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (row['kod'],)).fetchone()[0]
-                        dusulecekler, _ = recete_cozumle(mid, uretilen_toplam, stok_kontrol=False)
-                        
-                        # Önce yarı mamul üretimini simüle et
-                        for hm in dusulecekler:
-                            if 'id' in hm:
-                                # Hammaddeleri düş
-                                cursor.execute("UPDATE Stoklar SET miktar = miktar - ? WHERE id=?", (hm['gereken'], hm['id']))
-                                
-                                # Lot bazlı düşüş (FIFO)
-                                kalan = hm['gereken']
-                                lot_satirlari = cursor.execute("""
-                                    SELECT id, lot_no, miktar FROM LotStok
-                                    WHERE stok_id=? AND miktar > 0
-                                    ORDER BY id
-                                """, (hm['id'],)).fetchall()
-                                
-                                for lot_id, lot_no, lot_miktar in lot_satirlari:
-                                    if kalan <= 0:
-                                        break
-                                    kullan = min(kalan, lot_miktar)
-                                    cursor.execute("UPDATE LotStok SET miktar = miktar - ? WHERE id=?", (kullan, lot_id))
-                                    cursor.execute("INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih) VALUES (?,?,'SARF',?,?)", (hm['id'], kullan, lot_no, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                                    kalan -= kullan
-                        
-                        cursor.execute("UPDATE IsEmirleri SET durum='BİTTİ', bitis_tarihi=? WHERE id=?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row['id']))
-                        conn.commit()
-                        st.success("✅ İş emri başarıyla tamamlandı!")
-                        st.rerun()
+               if c2.button("✅ Bitir", key=f"b_{row['id']}"):
+    try:
+        uretilen_toplam = float(cursor.execute("SELECT COALESCE(SUM(miktar), 0) FROM UretimKayitlari WHERE is_emri_id=?", (int(row['id']),)).fetchone()[0])
+        if uretilen_toplam <= 0:
+            st.error("İş emri kapatılamaz: önce üretim kaydı girin.")
+            st.stop()
+        
+        # Üretilen mamulün ID'sini al
+        mid = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (row['kod'],)).fetchone()[0]
+        
+        # Tüm hammaddeleri recursive olarak topla (ID dahil)
+        hammaddeler = []
+        
+        def hammadde_topla(urun_id, miktar):
+            recete = cursor.execute("""
+                SELECT R.hammadde_id, R.miktar, S.tip
+                FROM Receteler R
+                JOIN Stoklar S ON S.id = R.hammadde_id
+                WHERE R.mamul_id = ?
+            """, (urun_id,)).fetchall()
+            
+            for hid, birim_miktar, tip in recete:
+                toplam_gereken = birim_miktar * miktar
+                if tip == 'MAM':
+                    hammadde_topla(hid, toplam_gereken)
+                else:
+                    hammaddeler.append({
+                        'id': hid,
+                        'gereken': toplam_gereken
+                    })
+        
+        hammadde_topla(mid, uretilen_toplam)
+        
+        if not hammaddeler:
+            st.warning("⚠️ Bu ürün için reçete tanımlı değil! Stok düşüşü yapılmadı.")
+        else:
+            # Hammaddeleri stoktan düş
+            for hm in hammaddeler:
+                hm_id = hm['id']
+                hm_gereken = hm['gereken']
+                
+                # Ana stoktan düş
+                cursor.execute("UPDATE Stoklar SET miktar = miktar - ? WHERE id=?", (hm_gereken, hm_id))
+                
+                # Lot bazlı düşüş (FIFO)
+                kalan = hm_gereken
+                lot_satirlari = cursor.execute("""
+                    SELECT id, lot_no, miktar FROM LotStok
+                    WHERE stok_id=? AND miktar > 0
+                    ORDER BY id
+                """, (hm_id,)).fetchall()
+                
+                for lot_id, lot_no, lot_miktar in lot_satirlari:
+                    if kalan <= 0:
+                        break
+                    kullan = min(kalan, lot_miktar)
+                    cursor.execute("UPDATE LotStok SET miktar = miktar - ? WHERE id=?", (kullan, lot_id))
+                    cursor.execute("""
+                        INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih)
+                        VALUES (?,?,'SARF',?,?)
+                    """, (hm_id, kullan, lot_no, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    kalan -= kullan
+                
+                if kalan > 0:
+                    st.warning(f"⚠️ {hm_id} nolu hammadde için stokta lot bulunamadı! {kalan:.2f} birim düşülemedi.")
+            
+            st.success(f"✅ {len(hammaddeler)} hammadde stoktan düşüldü.")
+        
+        # İş emrini kapat
+        cursor.execute("UPDATE IsEmirleri SET durum='BİTTİ', bitis_tarihi=? WHERE id=?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row['id']))
+        conn.commit()
+        st.rerun()
+        
+    except Exception as e:
+        conn.rollback()
+        st.error(f"İş emri bitirme hatası: {e}")
                     except Exception as e:
                         conn.rollback()
                         st.error(f"İş emri bitirme hatası: {e}")
