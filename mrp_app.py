@@ -9,7 +9,7 @@ import unicodedata
 import os
 import shutil
 
-# --- GÜVENLİK VE YARDIMCI FONKSİYONLAR ---
+# ---------------------------- GÜVENLİK / YARDIMCI ----------------------------
 def validate_lot_no(lot_no, prefix="IN"):
     if not lot_no or str(lot_no).upper() in ["NAN", "NONE", "NULL", ""]:
         return generate_lot(prefix)
@@ -18,10 +18,15 @@ def validate_lot_no(lot_no, prefix="IN"):
 def generate_lot(prefix):
     return f"{prefix}-{datetime.now().strftime('%d%m%H%M%S')}"
 
+# Proses takibi için uygun lotları getir
 def get_available_lots_for_process(stok_kodu=None, mevcut_asama=None):
     query = """
         SELECT 
-            S.id as stok_id, S.kod as stok_kodu, S.ad as stok_adi, L.lot_no, L.miktar,
+            S.id as stok_id,
+            S.kod as stok_kodu,
+            S.ad as stok_adi,
+            L.lot_no,
+            L.miktar,
             COALESCE(T.asama, 'KALITE') as mevcut_asama,
             COALESCE(T.son_guncelleme, '-') as son_guncelleme,
             COUNT(DISTINCT U.id) as uretim_sayisi
@@ -29,7 +34,8 @@ def get_available_lots_for_process(stok_kodu=None, mevcut_asama=None):
         JOIN Stoklar S ON S.id = L.stok_id
         LEFT JOIN LotAsamaTakip T ON T.stok_id = L.stok_id AND T.lot_no = L.lot_no
         LEFT JOIN UretimKayitlari U ON U.mamul_id = L.stok_id
-        WHERE L.miktar > 0 AND UPPER(COALESCE(S.tip, '')) NOT IN ('HAM', 'HAMMADDE')
+        WHERE L.miktar > 0
+          AND UPPER(COALESCE(S.tip, '')) NOT IN ('HAM', 'HAMMADDE')
     """
     params = []
     if stok_kodu:
@@ -50,7 +56,7 @@ def get_lot_process_history(lot_no, stok_kodu):
         ORDER BY G.id DESC
     """, conn, params=(lot_no, stok_kodu))
 
-# --- 1. VERİTABANI VE GÜVENLİK ---
+# ---------------------------- 1. VERİTABANI ----------------------------
 def make_hashes(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
@@ -93,25 +99,33 @@ def get_operator_assignment_for_day(atama_tarihi, vardiya_id, tezgah_id):
 def init_db():
     conn = sqlite3.connect("mrp_final_sistem.db", check_same_thread=False)
     cursor = conn.cursor()
+    # Kullanıcılar
     cursor.execute('CREATE TABLE IF NOT EXISTS Kullanicilar(username TEXT UNIQUE, password TEXT)')
     cursor.execute("SELECT * FROM Kullanicilar WHERE username='admin'")
     if not cursor.fetchone():
         cursor.execute("INSERT INTO Kullanicilar(username, password) VALUES ('admin', ?)", (make_hashes("admin123"),))
+    # Stoklar
     cursor.execute('''CREATE TABLE IF NOT EXISTS Stoklar (
         id INTEGER PRIMARY KEY, kod TEXT UNIQUE, ad TEXT, tip TEXT, birim TEXT, miktar REAL DEFAULT 0)''')
+    # Reçeteler
     cursor.execute('CREATE TABLE IF NOT EXISTS Receteler (id INTEGER PRIMARY KEY, mamul_id INTEGER, hammadde_id INTEGER, miktar REAL)')
+    # İş Emirleri
     cursor.execute('''CREATE TABLE IF NOT EXISTS IsEmirleri (
         id INTEGER PRIMARY KEY, mamul_id INTEGER, adet REAL, lot_no TEXT, durum TEXT, 
         baslangic_tarihi TEXT, bitis_tarihi TEXT)''')
+    # Hareketler
     cursor.execute('''CREATE TABLE IF NOT EXISTS Hareketler (
         id INTEGER PRIMARY KEY, stok_id INTEGER, hareket_miktari REAL, tip TEXT, 
         lot_no TEXT, tarih TEXT, firma_adi TEXT, irsaliye_no TEXT)''')
+    # LotStok
     cursor.execute('''CREATE TABLE IF NOT EXISTS LotStok (
         id INTEGER PRIMARY KEY, stok_id INTEGER, lot_no TEXT, miktar REAL DEFAULT 0, UNIQUE(stok_id, lot_no))''')
+    # LotAsamaTakip / Gecmis
     cursor.execute('''CREATE TABLE IF NOT EXISTS LotAsamaTakip (
         id INTEGER PRIMARY KEY, stok_id INTEGER, lot_no TEXT, asama TEXT, son_guncelleme TEXT, UNIQUE(stok_id, lot_no))''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS LotAsamaGecmis (
         id INTEGER PRIMARY KEY, stok_id INTEGER, lot_no TEXT, asama TEXT, tarih TEXT, aciklama TEXT)''')
+    # Operatör / Tezgah / Vardiya
     cursor.execute('''CREATE TABLE IF NOT EXISTS Operatorler (id INTEGER PRIMARY KEY, ad TEXT UNIQUE NOT NULL)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS Tezgahlar (id INTEGER PRIMARY KEY, kod TEXT UNIQUE NOT NULL, ad TEXT)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS Vardiyalar (id INTEGER PRIMARY KEY, ad TEXT, baslangic TEXT, bitis TEXT)''')
@@ -121,12 +135,15 @@ def init_db():
         id INTEGER PRIMARY KEY, tezgah_id INTEGER UNIQUE, operator_a_id INTEGER, operator_b_id INTEGER, baslangic_tarihi TEXT)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS UretimKayitlari (
         id INTEGER PRIMARY KEY, is_emri_id INTEGER, mamul_id INTEGER, tezgah_id INTEGER, vardiya_id INTEGER, operator_id INTEGER, miktar REAL, tarih TEXT)''')
+    # Varsayılan vardiyalar
     cursor.execute("INSERT OR IGNORE INTO Vardiyalar (id, ad, baslangic, bitis) VALUES (1, '07:00-15:00', '07:00', '15:00')")
     cursor.execute("INSERT OR IGNORE INTO Vardiyalar (id, ad, baslangic, bitis) VALUES (2, '15:00-23:00', '15:00', '23:00')")
     cursor.execute("INSERT OR IGNORE INTO Vardiyalar (id, ad, baslangic, bitis) VALUES (3, '23:00-07:00', '23:00', '07:00')")
+    # Sistem ayarları
     cursor.execute('CREATE TABLE IF NOT EXISTS SistemAyarlari (anahtar TEXT UNIQUE, deger TEXT)')
     cursor.execute("INSERT OR IGNORE INTO SistemAyarlari (anahtar, deger) VALUES ('sirket_adi', 'PRO MRP SİSTEMLERİ')")
     cursor.execute("INSERT OR IGNORE INTO SistemAyarlari (anahtar, deger) VALUES ('versiyon', 'v1.0.0')")
+    # Kolon eklemeleri (eski versiyon uyumu)
     kolonlar = [c[1] for c in cursor.execute("PRAGMA table_info(IsEmirleri)").fetchall()]
     if "sarf_lot_no" not in kolonlar:
         cursor.execute("ALTER TABLE IsEmirleri ADD COLUMN sarf_lot_no TEXT")
@@ -139,15 +156,16 @@ def init_db():
         cursor.execute("ALTER TABLE Hareketler ADD COLUMN firma_adi TEXT")
     if "irsaliye_no" not in hareket_kolonlar:
         cursor.execute("ALTER TABLE Hareketler ADD COLUMN irsaliye_no TEXT")
+    # İndeksler
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_hareketler_tarih ON Hareketler(tarih)",
         "CREATE INDEX IF NOT EXISTS idx_hareketler_stok ON Hareketler(stok_id)",
         "CREATE INDEX IF NOT EXISTS idx_lotstok_stok ON LotStok(stok_id)",
         "CREATE INDEX IF NOT EXISTS idx_isemirleri_durum ON IsEmirleri(durum)",
     ]
-    for idx_query in indexes:
+    for idx in indexes:
         try:
-            cursor.execute(idx_query)
+            cursor.execute(idx)
         except:
             pass
     conn.commit()
@@ -156,7 +174,7 @@ def init_db():
 conn = init_db()
 cursor = conn.cursor()
 
-# --- GİRİŞ KONTROLÜ ---
+# ---------------------------- GİRİŞ & SİSTEM AYARLARI ----------------------------
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
 
@@ -171,7 +189,7 @@ if not st.session_state['logged_in']:
     """, unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
-        st.markdown(f"<div class='login-container'>", unsafe_allow_html=True)
+        st.markdown("<div class='login-container'>", unsafe_allow_html=True)
         st.title(f"🔒 {sirket_adi}")
         st.caption(f"Versiyon: {versiyon}")
         with st.form("login"):
@@ -187,6 +205,7 @@ if not st.session_state['logged_in']:
         st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
+# ---------------------------- STOK SENKRONİZASYON ----------------------------
 def sync_stocks_from_production():
     produced_ids = [int(r[0]) for r in cursor.execute("SELECT DISTINCT mamul_id FROM UretimKayitlari").fetchall()]
     if not produced_ids:
@@ -202,6 +221,7 @@ def sync_stocks_from_production():
         if abs(eski_stok - yeni_stok) > 1e-9:
             cursor.execute("UPDATE Stoklar SET miktar=? WHERE id=?", (yeni_stok, stok_id))
             stok_guncel_sayisi += 1
+        # lot bazlı yenileme
         uretim_lotlari = {str(lot_no): float(mik) for lot_no, mik in cursor.execute("""
             SELECT I.lot_no, COALESCE(SUM(U.miktar), 0)
             FROM UretimKayitlari U JOIN IsEmirleri I ON I.id = U.is_emri_id
@@ -217,24 +237,24 @@ def sync_stocks_from_production():
         """, (stok_id,)).fetchall()}
         tum_lotlar = set(uretim_lotlari.keys()) | set(giris_devir_lotlari.keys()) | set(cikis_lotlari.keys())
         for lot_no in tum_lotlar:
-            yeni_lot_miktar = max(uretim_lotlari.get(lot_no, 0.0) + giris_devir_lotlari.get(lot_no, 0.0) - cikis_lotlari.get(lot_no, 0.0), 0.0)
-            mevcut = cursor.execute("SELECT id, COALESCE(miktar, 0) FROM LotStok WHERE stok_id=? AND lot_no=?", (stok_id, lot_no)).fetchone()
+            yeni_lot_miktar = max(uretim_lotlari.get(lot_no,0.0)+giris_devir_lotlari.get(lot_no,0.0)-cikis_lotlari.get(lot_no,0.0),0.0)
+            mevcut = cursor.execute("SELECT id, COALESCE(miktar,0) FROM LotStok WHERE stok_id=? AND lot_no=?",(stok_id,lot_no)).fetchone()
             if mevcut:
                 lot_id, eski_lot_miktar = int(mevcut[0]), float(mevcut[1])
                 if abs(eski_lot_miktar - yeni_lot_miktar) > 1e-9:
-                    if yeni_lot_miktar > 0:
-                        cursor.execute("UPDATE LotStok SET miktar=? WHERE id=?", (yeni_lot_miktar, lot_id))
+                    if yeni_lot_miktar>0:
+                        cursor.execute("UPDATE LotStok SET miktar=? WHERE id=?",(yeni_lot_miktar,lot_id))
                     else:
-                        cursor.execute("DELETE FROM LotStok WHERE id=?", (lot_id,))
-                    lot_guncel_sayisi += 1
-            elif yeni_lot_miktar > 0:
-                cursor.execute("INSERT INTO LotStok (stok_id, lot_no, miktar) VALUES (?,?,?)", (stok_id, lot_no, yeni_lot_miktar))
-                lot_guncel_sayisi += 1
+                        cursor.execute("DELETE FROM LotStok WHERE id=?",(lot_id,))
+                    lot_guncel_sayisi +=1
+            elif yeni_lot_miktar>0:
+                cursor.execute("INSERT INTO LotStok(stok_id,lot_no,miktar) VALUES(?,?,?)",(stok_id,lot_no,yeni_lot_miktar))
+                lot_guncel_sayisi +=1
     conn.commit()
     return stok_guncel_sayisi, lot_guncel_sayisi
 
+# ---------------------------- SAYFA YAPILANDIRMASI ----------------------------
 st.set_page_config(page_title=f"{sirket_adi}", layout="wide")
-
 st.markdown("""
     <style>
     [data-testid="stSidebar"] { background-color: #0e1117; }
@@ -256,7 +276,7 @@ if st.sidebar.button("🚪 Güvenli Çıkış", use_container_width=True):
 
 menu = st.sidebar.radio("MENÜ NAVİGASYON", ["📊 Dashboard", "📦 Stok Yönetimi", "📜 Reçete Yönetimi", "🛠️ İş Emirleri", "🏭 Proses Takip", "🚚 Sevkiyat", "⚙️ Ayarlar & Yedek"])
 
-# --- 📊 DASHBOARD ---
+# ---------------------------- 📊 DASHBOARD ----------------------------
 if menu == "📊 Dashboard":
     st.header("📊 Genel Durum")
     search_q = st.text_input("🔍 Stok Filtrele...").lower()
@@ -281,9 +301,12 @@ if menu == "📊 Dashboard":
             df_lot = df_lot[df_lot['kod'].str.lower().str.contains(search_q) | df_lot['ad'].fillna("").str.lower().str.contains(search_q) | df_lot['lot_no'].str.lower().str.contains(search_q)]
         st.dataframe(df_lot, use_container_width=True)
 
-# --- 📦 STOK YÖNETİMİ ---
+# ---------------------------- 📦 STOK YÖNETİMİ ----------------------------
 elif menu == "📦 Stok Yönetimi":
     st.header("📦 Stok Yönetimi")
+    if st.sidebar.button("⚠️ TÜM STOKLARI SIFIRLA"):
+        cursor.execute("UPDATE Stoklar SET miktar = 0")
+        conn.commit(); st.rerun()
     t1, t2, t3, t4 = st.tabs(["✍️ Stok Kartı", "📥 Stok Girişi", "📋 Stok Giriş Geçmişi", "📂 Excel'den Yükle"])
     df_stoklar = pd.read_sql_query("SELECT * FROM Stoklar", conn)
     with t1:
@@ -292,7 +315,7 @@ elif menu == "📦 Stok Yönetimi":
             row = df_stoklar[df_stoklar['kod'] == secilen].iloc[0] if secilen != "YENİ" else None
             k = st.text_input("Ürün Kodu", value=str(row['kod']) if row is not None else "").strip().upper()
             a = st.text_input("Ürün Adı", value=str(row['ad']) if row is not None else "")
-            t = st.selectbox("Tip", ["HAM", "MAM"], index=0 if row is None or "HAM" in str(row['tip']).upper() else 1)
+            tip_ = st.selectbox("Tip", ["HAM", "MAM"], index=0 if row is None or "HAM" in str(row['tip']).upper() else 1)
             birim_varsayilan = str(row['birim']).strip().upper() if row is not None and pd.notna(row['birim']) else "KG"
             birim_secenekleri = ["KG", "ADET", "MT", "LT"]
             if birim_varsayilan not in birim_secenekleri:
@@ -300,7 +323,7 @@ elif menu == "📦 Stok Yönetimi":
             b = st.selectbox("Birim", birim_secenekleri, index=birim_secenekleri.index(birim_varsayilan))
             if st.form_submit_button("Kaydet"):
                 if k:
-                    cursor.execute("INSERT OR REPLACE INTO Stoklar (kod, ad, tip, birim) VALUES (?,?,?,?)", (k, a, t, b))
+                    cursor.execute("INSERT OR REPLACE INTO Stoklar (kod, ad, tip, birim) VALUES (?,?,?,?)", (k, a, tip_, b))
                     conn.commit(); st.success("Kaydedildi"); st.rerun()
                 else:
                     st.error("Kod boş olamaz!")
@@ -343,14 +366,14 @@ elif menu == "📦 Stok Yönetimi":
                     if not kod or kod == "NAN":
                         continue
                     ad = str(r.iloc[1]) if len(df_up.columns) > 1 else ""
-                    tip = "HAM" if "HAM" in str(r.iloc[2]).upper() else "MAM" if len(df_up.columns) > 2 else "HAM"
+                    tip_ = "HAM" if "HAM" in str(r.iloc[2]).upper() else "MAM" if len(df_up.columns) > 2 else "HAM"
                     birim = str(r.iloc[3]) if len(df_up.columns) > 3 else "KG"
-                    cursor.execute("INSERT OR REPLACE INTO Stoklar (kod, ad, tip, birim) VALUES (?,?,?,?)", (kod, ad, tip, birim))
+                    cursor.execute("INSERT OR REPLACE INTO Stoklar (kod, ad, tip, birim) VALUES (?,?,?,?)", (kod, ad, tip_, birim))
                 conn.commit(); st.success("Aktarım Başarılı"); st.rerun()
             except Exception as e:
                 st.error(f"Excel Hatası: {e}")
 
-# --- 📜 REÇETE YÖNETİMİ ---
+# ---------------------------- 📜 REÇETE YÖNETİMİ ----------------------------
 elif menu == "📜 Reçete Yönetimi":
     st.header("📜 Reçete Yönetimi")
     t1, t2 = st.tabs(["➕ Manuel Reçete Girişi", "📂 Excel'den Toplu Yükleme"])
@@ -388,7 +411,7 @@ elif menu == "📜 Reçete Yönetimi":
     df_list = pd.read_sql_query("SELECT S1.kod as Mamul, S2.kod as Bilesen, R.miktar FROM Receteler R JOIN Stoklar S1 ON R.mamul_id=S1.id JOIN Stoklar S2 ON R.hammadde_id=S2.id", conn)
     st.dataframe(df_list, use_container_width=True)
 
-# --- 🛠️ İŞ EMİRLERİ ---
+# ---------------------------- 🛠️ İŞ EMİRLERİ ----------------------------
 elif menu == "🛠️ İş Emirleri":
     st.header("🛠️ İş Emirleri")
     t1, t2, t3, t4 = st.tabs(["🚀 Yeni İş Emri", "✅ Açık Emirler", "🏁 Biten/İptal", "👥 Vardiya/Tezgah"])
@@ -439,6 +462,7 @@ elif menu == "🛠️ İş Emirleri":
                 c1, c2, c3 = st.columns([0.54, 0.23, 0.23])
                 toplam_uret = cursor.execute("SELECT COALESCE(SUM(miktar), 0) FROM UretimKayitlari WHERE is_emri_id=?", (int(row['id']),)).fetchone()[0]
                 c1.write(f"**{row['kod']}** | Plan: {row['adet']} | Üretilen: {float(toplam_uret):.3f} | Lot: {row['lot_no']} | Tezgah: {row['tezgah_kod'] or '-'} | Operatör: {row['operator_ad'] or '-'}")
+                
                 with c2.popover("➕ Üretim Gir"):
                     p_miktar = st.number_input("Miktar", min_value=0.001, value=1.0, format="%.3f", key=f"pm_{row['id']}")
                     p_tarih = st.date_input("Tarih", value=datetime.now().date(), key=f"pt_{row['id']}")
@@ -456,80 +480,46 @@ elif menu == "🛠️ İş Emirleri":
                         st.success("Üretim kaydı eklendi.")
                         st.rerun()
                 
-                # ✅ DÜZELTİLMİŞ BITIR BUTONU - DOĞRU GİRİNTİDE
+                # ------- HAMMADDEDEN DÜŞME (KRİTİK KISIM) -------
                 if c2.button("✅ Bitir", key=f"b_{row['id']}"):
                     try:
                         uretilen_toplam = float(cursor.execute("SELECT COALESCE(SUM(miktar), 0) FROM UretimKayitlari WHERE is_emri_id=?", (int(row['id']),)).fetchone()[0])
                         if uretilen_toplam <= 0:
                             st.error("İş emri kapatılamaz: önce üretim kaydı girin.")
                             st.stop()
-                        
-                        # Üretilen mamulün ID'sini al
                         mid = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (row['kod'],)).fetchone()[0]
-                        
-                        # Tüm hammaddeleri recursive olarak topla (ID dahil)
                         hammaddeler = []
-                        
                         def hammadde_topla(urun_id, miktar):
-                            recete = cursor.execute("""
-                                SELECT R.hammadde_id, R.miktar, S.tip
-                                FROM Receteler R
-                                JOIN Stoklar S ON S.id = R.hammadde_id
-                                WHERE R.mamul_id = ?
-                            """, (urun_id,)).fetchall()
-                            
+                            recete = cursor.execute("SELECT R.hammadde_id, R.miktar, S.tip FROM Receteler R JOIN Stoklar S ON S.id = R.hammadde_id WHERE R.mamul_id = ?", (urun_id,)).fetchall()
                             for hid, birim_miktar, tip in recete:
                                 toplam_gereken = birim_miktar * miktar
                                 if tip == 'MAM':
                                     hammadde_topla(hid, toplam_gereken)
                                 else:
-                                    hammaddeler.append({
-                                        'id': hid,
-                                        'gereken': toplam_gereken
-                                    })
-                        
+                                    hammaddeler.append({'id': hid, 'gereken': toplam_gereken})
                         hammadde_topla(mid, uretilen_toplam)
-                        
                         if not hammaddeler:
                             st.warning("⚠️ Bu ürün için reçete tanımlı değil! Stok düşüşü yapılmadı.")
                         else:
-                            # Hammaddeleri stoktan düş
                             for hm in hammaddeler:
                                 hm_id = hm['id']
                                 hm_gereken = hm['gereken']
-                                
-                                # Ana stoktan düş
                                 cursor.execute("UPDATE Stoklar SET miktar = miktar - ? WHERE id=?", (hm_gereken, hm_id))
-                                
-                                # Lot bazlı düşüş (FIFO)
                                 kalan = hm_gereken
-                                lot_satirlari = cursor.execute("""
-                                    SELECT id, lot_no, miktar FROM LotStok
-                                    WHERE stok_id=? AND miktar > 0
-                                    ORDER BY id
-                                """, (hm_id,)).fetchall()
-                                
+                                lot_satirlari = cursor.execute("SELECT id, lot_no, miktar FROM LotStok WHERE stok_id=? AND miktar > 0 ORDER BY id", (hm_id,)).fetchall()
                                 for lot_id, lot_no, lot_miktar in lot_satirlari:
                                     if kalan <= 0:
                                         break
                                     kullan = min(kalan, lot_miktar)
                                     cursor.execute("UPDATE LotStok SET miktar = miktar - ? WHERE id=?", (kullan, lot_id))
-                                    cursor.execute("""
-                                        INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih)
-                                        VALUES (?,?,'SARF',?,?)
-                                    """, (hm_id, kullan, lot_no, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                                    cursor.execute("INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih) VALUES (?,?,'SARF',?,?)", (hm_id, kullan, lot_no, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
                                     kalan -= kullan
-                                
                                 if kalan > 0:
                                     st.warning(f"⚠️ Stokta lot bulunamadı! {kalan:.2f} birim düşülemedi.")
-                            
                             st.success(f"✅ {len(hammaddeler)} hammadde stoktan düşüldü.")
-                        
-                        # İş emrini kapat
                         cursor.execute("UPDATE IsEmirleri SET durum='BİTTİ', bitis_tarihi=? WHERE id=?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row['id']))
                         conn.commit()
                         st.rerun()
-                        
                     except Exception as e:
                         conn.rollback()
                         st.error(f"İş emri bitirme hatası: {e}")
@@ -550,11 +540,11 @@ elif menu == "🛠️ İş Emirleri":
         """, conn)
         if not df_kapali.empty:
             df_kapali["plana_uyum_%"] = df_kapali.apply(lambda r: (float(r["gerceklesen_uretim"]) / float(r["adet"]) * 100.0) if float(r["adet"]) > 0 else 0.0, axis=1)
-            st.dataframe(df_kapali[['kod', 'adet', 'gerceklesen_uretim', 'plana_uyum_%', 'lot_no', 'durum', 'baslangic_tarihi', 'bitis_tarihi']], use_container_width=True)
-           with t4:
+            st.dataframe(df_kapali[['kod','adet','gerceklesen_uretim','plana_uyum_%','lot_no','durum','baslangic_tarihi','bitis_tarihi']], use_container_width=True)
+    with t4:
+        # ---- VARDİYA / TEZGAH (TAM ve EKSİKSİZ) ----
         st.subheader("Operatör ve Tezgah Tanımları")
         c_op, c_tz = st.columns(2)
-        
         with c_op:
             with st.form("op_form"):
                 op_ad = st.text_input("Operatör Adı").strip()
@@ -567,11 +557,7 @@ elif menu == "🛠️ İş Emirleri":
             op_list_df = pd.read_sql_query("SELECT id, ad FROM Operatorler ORDER BY ad", conn)
             if not op_list_df.empty:
                 st.markdown("##### Operatör Düzelt / Sil")
-                sec_op = st.selectbox(
-                    "Operatör seç",
-                    op_list_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist(),
-                    key="op_duzenle_sec"
-                )
+                sec_op = st.selectbox("Operatör seç", op_list_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist(), key="op_duzenle_sec")
                 sec_op_id = int(sec_op.split("|")[0].strip())
                 sec_op_ad = op_list_df[op_list_df['id'] == sec_op_id]['ad'].values[0]
                 with st.form("op_duzelt_form"):
@@ -598,10 +584,9 @@ elif menu == "🛠️ İş Emirleri":
                                 st.success("Operatör silindi.")
                                 st.rerun()
                             except sqlite3.IntegrityError:
-                                st.error("Bu operatör atama/üretim kayıtlarında kullanılıyor. Önce bağlı kayıtları güncelleyin.")
+                                st.error("Bu operatör atama/üretim kayıtlarında kullanılıyor.")
                         else:
                             st.info("Silmek için onay kutusunu işaretleyin.")
-        
         with c_tz:
             with st.form("tz_form"):
                 tz_kod = st.text_input("Tezgah Kodu").strip().upper()
@@ -615,11 +600,7 @@ elif menu == "🛠️ İş Emirleri":
             tz_list_df = pd.read_sql_query("SELECT id, kod, COALESCE(ad, '') as ad FROM Tezgahlar ORDER BY kod", conn)
             if not tz_list_df.empty:
                 st.markdown("##### Tezgah Düzelt / Sil")
-                sec_tz = st.selectbox(
-                    "Tezgah seç",
-                    tz_list_df.apply(lambda r: f"{r['id']} | {r['kod']} {r['ad']}".strip(), axis=1).tolist(),
-                    key="tz_duzenle_sec"
-                )
+                sec_tz = st.selectbox("Tezgah seç", tz_list_df.apply(lambda r: f"{r['id']} | {r['kod']} {r['ad']}".strip(), axis=1).tolist(), key="tz_duzenle_sec")
                 sec_tz_id = int(sec_tz.split("|")[0].strip())
                 sec_tz_satir = tz_list_df[tz_list_df['id'] == sec_tz_id].iloc[0]
                 with st.form("tz_duzelt_form"):
@@ -647,10 +628,9 @@ elif menu == "🛠️ İş Emirleri":
                                 st.success("Tezgah silindi.")
                                 st.rerun()
                             except sqlite3.IntegrityError:
-                                st.error("Bu tezgah atama/üretim kayıtlarında kullanılıyor. Önce bağlı kayıtları güncelleyin.")
+                                st.error("Bu tezgah atama/üretim kayıtlarında kullanılıyor.")
                         else:
                             st.info("Silmek için onay kutusunu işaretleyin.")
-
         st.subheader("Haftalık Rotasyon (Sabah/Aksam)")
         ops_df = pd.read_sql_query("SELECT id, ad FROM Operatorler ORDER BY ad", conn)
         tez_df = pd.read_sql_query("SELECT id, kod, COALESCE(ad, '') as ad FROM Tezgahlar ORDER BY kod", conn)
@@ -658,21 +638,9 @@ elif menu == "🛠️ İş Emirleri":
             st.info("Rotasyon tanımlamak için önce operatör ve tezgah tanımlayın.")
         else:
             with st.form("rotasyon_form"):
-                r_tez = st.selectbox(
-                    "Tezgah",
-                    tez_df.apply(lambda r: f"{r['id']} | {r['kod']} {r['ad']}".strip(), axis=1).tolist(),
-                    key="rot_tez"
-                )
-                r_op_a = st.selectbox(
-                    "Operatör A (başlangıç haftasında SABAH)",
-                    ops_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist(),
-                    key="rot_op_a"
-                )
-                r_op_b = st.selectbox(
-                    "Operatör B (başlangıç haftasında AKŞAM)",
-                    ops_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist(),
-                    key="rot_op_b"
-                )
+                r_tez = st.selectbox("Tezgah", tez_df.apply(lambda r: f"{r['id']} | {r['kod']} {r['ad']}".strip(), axis=1).tolist(), key="rot_tez")
+                r_op_a = st.selectbox("Operatör A (başlangıç haftasında SABAH)", ops_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist(), key="rot_op_a")
+                r_op_b = st.selectbox("Operatör B (başlangıç haftasında AKŞAM)", ops_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist(), key="rot_op_b")
                 r_bas = st.date_input("Rotasyon Başlangıç Tarihi", value=datetime.now().date(), key="rot_bas")
                 if st.form_submit_button("Rotasyonu Kaydet"):
                     tez_id = int(r_tez.split("|")[0].strip())
@@ -681,36 +649,14 @@ elif menu == "🛠️ İş Emirleri":
                     if op_a_id == op_b_id:
                         st.error("Operatör A ve B farklı olmalıdır.")
                     else:
-                        cursor.execute("""
-                            INSERT INTO HaftalikRotasyonlar (tezgah_id, operator_a_id, operator_b_id, baslangic_tarihi)
-                            VALUES (?,?,?,?)
-                            ON CONFLICT(tezgah_id) DO UPDATE SET
-                                operator_a_id=excluded.operator_a_id,
-                                operator_b_id=excluded.operator_b_id,
-                                baslangic_tarihi=excluded.baslangic_tarihi
-                        """, (tez_id, op_a_id, op_b_id, r_bas.strftime("%Y-%m-%d")))
+                        cursor.execute("INSERT INTO HaftalikRotasyonlar (tezgah_id, operator_a_id, operator_b_id, baslangic_tarihi) VALUES (?,?,?,?) ON CONFLICT(tezgah_id) DO UPDATE SET operator_a_id=excluded.operator_a_id, operator_b_id=excluded.operator_b_id, baslangic_tarihi=excluded.baslangic_tarihi", (tez_id, op_a_id, op_b_id, r_bas.strftime("%Y-%m-%d")))
                         conn.commit()
                         st.success("Haftalık rotasyon kaydedildi.")
                         st.rerun()
-
-            rot_df = pd.read_sql_query("""
-                SELECT
-                    R.id,
-                    T.kod as tezgah_kod,
-                    COALESCE(T.ad, '') as tezgah_ad,
-                    OA.ad as operator_a,
-                    OB.ad as operator_b,
-                    R.baslangic_tarihi
-                FROM HaftalikRotasyonlar R
-                JOIN Tezgahlar T ON T.id = R.tezgah_id
-                JOIN Operatorler OA ON OA.id = R.operator_a_id
-                JOIN Operatorler OB ON OB.id = R.operator_b_id
-                ORDER BY T.kod
-            """, conn)
+            rot_df = pd.read_sql_query("SELECT R.id, T.kod as tezgah_kod, COALESCE(T.ad, '') as tezgah_ad, OA.ad as operator_a, OB.ad as operator_b, R.baslangic_tarihi FROM HaftalikRotasyonlar R JOIN Tezgahlar T ON T.id = R.tezgah_id JOIN Operatorler OA ON OA.id = R.operator_a_id JOIN Operatorler OB ON OB.id = R.operator_b_id ORDER BY T.kod", conn)
             if not rot_df.empty:
                 st.caption("Kural: çift haftada sabah=A / akşam=B, tek haftada sabah=B / akşam=A")
-                st.dataframe(rot_df[['id', 'tezgah_kod', 'tezgah_ad', 'operator_a', 'operator_b', 'baslangic_tarihi']], use_container_width=True)
-
+                st.dataframe(rot_df[['id','tezgah_kod','tezgah_ad','operator_a','operator_b','baslangic_tarihi']], use_container_width=True)
                 st.markdown("##### Rotasyon Önizleme (Bu Hafta + 4 Hafta)")
                 bugun = datetime.now().date()
                 hafta_basi = bugun - timedelta(days=bugun.weekday())
@@ -718,33 +664,20 @@ elif menu == "🛠️ İş Emirleri":
                 for _, rr in rot_df.iterrows():
                     bas_tarih = datetime.strptime(str(rr['baslangic_tarihi']), "%Y-%m-%d").date()
                     for i in range(5):
-                        h_bas = hafta_basi + timedelta(days=7 * i)
+                        h_bas = hafta_basi + timedelta(days=7*i)
                         hafta_farki = (h_bas - bas_tarih).days // 7
                         cift_hafta = (hafta_farki % 2 == 0)
                         sabah_op = rr['operator_a'] if cift_hafta else rr['operator_b']
                         aksam_op = rr['operator_b'] if cift_hafta else rr['operator_a']
-                        onizleme_satirlari.append({
-                            "tezgah_kod": rr['tezgah_kod'],
-                            "tezgah_ad": rr['tezgah_ad'],
-                            "hafta_baslangici": h_bas.strftime("%Y-%m-%d"),
-                            "sabah_07_15": sabah_op,
-                            "aksam_15_23": aksam_op
-                        })
-                df_rot_oniz = pd.DataFrame(onizleme_satirlari).sort_values(["tezgah_kod", "hafta_baslangici"])
+                        onizleme_satirlari.append({"tezgah_kod":rr['tezgah_kod'], "tezgah_ad":rr['tezgah_ad'], "hafta_baslangici":h_bas.strftime("%Y-%m-%d"), "sabah_07_15":sabah_op, "aksam_15_23":aksam_op})
+                df_rot_oniz = pd.DataFrame(onizleme_satirlari).sort_values(["tezgah_kod","hafta_baslangici"])
                 st.dataframe(df_rot_oniz, use_container_width=True)
-
-                sec_rot = st.selectbox(
-                    "Silinecek rotasyon",
-                    rot_df['id'].tolist(),
-                    format_func=lambda x: f"ID {x} - {rot_df[rot_df['id'] == x]['tezgah_kod'].values[0]}",
-                    key="rot_sil_sec"
-                )
+                sec_rot = st.selectbox("Silinecek rotasyon", rot_df['id'].tolist(), format_func=lambda x: f"ID {x} - {rot_df[rot_df['id']==x]['tezgah_kod'].values[0]}", key="rot_sil_sec")
                 if st.button("🗑️ Rotasyonu Sil", key="rot_sil_btn", type="secondary"):
                     cursor.execute("DELETE FROM HaftalikRotasyonlar WHERE id=?", (int(sec_rot),))
                     conn.commit()
                     st.success("Rotasyon silindi.")
                     st.rerun()
-
         st.subheader("Vardiya Ataması")
         ops_df = pd.read_sql_query("SELECT id, ad FROM Operatorler ORDER BY ad", conn)
         tez_df = pd.read_sql_query("SELECT id, kod, COALESCE(ad, '') as ad FROM Tezgahlar ORDER BY kod", conn)
@@ -768,84 +701,33 @@ elif menu == "🛠️ İş Emirleri":
                             vard_id = int(a_vard.split("|")[0].strip())
                             for a_tez in a_tezler:
                                 tez_id = int(a_tez.split("|")[0].strip())
-                                cursor.execute("""
-                                    INSERT INTO VardiyaAtamalari (tarih, vardiya_id, tezgah_id, operator_id)
-                                    VALUES (?, ?, ?, ?)
-                                    ON CONFLICT(tarih, vardiya_id, tezgah_id)
-                                    DO UPDATE SET operator_id=excluded.operator_id
-                                """, (a_tarih.strftime("%Y-%m-%d"), vard_id, tez_id, op_id))
+                                cursor.execute("INSERT INTO VardiyaAtamalari (tarih, vardiya_id, tezgah_id, operator_id) VALUES (?,?,?,?) ON CONFLICT(tarih, vardiya_id, tezgah_id) DO UPDATE SET operator_id=excluded.operator_id", (a_tarih.strftime("%Y-%m-%d"), vard_id, tez_id, op_id))
                         conn.commit()
                         st.success(f"Vardiya atamasi kaydedildi. Vardiya: {len(a_vardiyalar)} | Tezgah: {len(a_tezler)}")
                         st.rerun()
             st.markdown("#### Atama Düzelt / Sil")
-            atama_df = pd.read_sql_query("""
-                SELECT
-                    A.id,
-                    A.tarih,
-                    A.vardiya_id,
-                    V.ad as vardiya_ad,
-                    A.tezgah_id,
-                    T.kod as tezgah_kod,
-                    COALESCE(T.ad, '') as tezgah_ad,
-                    A.operator_id,
-                    O.ad as operator_ad
-                FROM VardiyaAtamalari A
-                JOIN Vardiyalar V ON V.id = A.vardiya_id
-                JOIN Tezgahlar T ON T.id = A.tezgah_id
-                JOIN Operatorler O ON O.id = A.operator_id
-                ORDER BY A.tarih DESC, A.vardiya_id, T.kod
-            """, conn)
+            atama_df = pd.read_sql_query("SELECT A.id, A.tarih, A.vardiya_id, V.ad as vardiya_ad, A.tezgah_id, T.kod as tezgah_kod, COALESCE(T.ad, '') as tezgah_ad, A.operator_id, O.ad as operator_ad FROM VardiyaAtamalari A JOIN Vardiyalar V ON V.id = A.vardiya_id JOIN Tezgahlar T ON T.id = A.tezgah_id JOIN Operatorler O ON O.id = A.operator_id ORDER BY A.tarih DESC, A.vardiya_id, T.kod", conn)
             if atama_df.empty:
                 st.info("Henüz atama kaydı yok.")
             else:
-                st.dataframe(
-                    atama_df[['id', 'tarih', 'vardiya_ad', 'tezgah_kod', 'tezgah_ad', 'operator_ad']],
-                    use_container_width=True
-                )
-                secenekler = atama_df.apply(
-                    lambda r: f"{r['id']} | {r['tarih']} | {r['vardiya_ad']} | {r['tezgah_kod']} | {r['operator_ad']}",
-                    axis=1
-                ).tolist()
+                st.dataframe(atama_df[['id','tarih','vardiya_ad','tezgah_kod','tezgah_ad','operator_ad']], use_container_width=True)
+                secenekler = atama_df.apply(lambda r: f"{r['id']} | {r['tarih']} | {r['vardiya_ad']} | {r['tezgah_kod']} | {r['operator_ad']}", axis=1).tolist()
                 secim = st.selectbox("Düzenlenecek/Silinecek atama", secenekler, key="atama_duzenle_sec")
                 sec_id = int(secim.split("|")[0].strip())
-                sec_satir = atama_df[atama_df['id'] == sec_id].iloc[0]
-
-                col_duz, col_sil = st.columns([0.7, 0.3])
+                sec_satir = atama_df[atama_df['id']==sec_id].iloc[0]
+                col_duz, col_sil = st.columns([0.7,0.3])
                 with col_duz:
                     with st.form("atama_duzelt_form"):
-                        n_tarih = st.date_input(
-                            "Yeni Tarih",
-                            value=datetime.strptime(sec_satir['tarih'], "%Y-%m-%d").date(),
-                            key="atama_duz_tarih"
-                        )
-                        n_vard = st.selectbox(
-                            "Yeni Vardiya",
-                            vard_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist(),
-                            index=max(int(sec_satir['vardiya_id']) - 1, 0),
-                            key="atama_duz_vard"
-                        )
-                        n_tez = st.selectbox(
-                            "Yeni Tezgah",
-                            tez_df.apply(lambda r: f"{r['id']} | {r['kod']} {r['ad']}".strip(), axis=1).tolist(),
-                            index=tez_df.index[tez_df['id'] == int(sec_satir['tezgah_id'])][0],
-                            key="atama_duz_tez"
-                        )
-                        n_op = st.selectbox(
-                            "Yeni Operatör",
-                            ops_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist(),
-                            index=ops_df.index[ops_df['id'] == int(sec_satir['operator_id'])][0],
-                            key="atama_duz_op"
-                        )
+                        n_tarih = st.date_input("Yeni Tarih", value=datetime.strptime(sec_satir['tarih'],"%Y-%m-%d").date(), key="atama_duz_tarih")
+                        n_vard = st.selectbox("Yeni Vardiya", vard_df.apply(lambda r: f"{r['id']}|{r['ad']}",axis=1).tolist(), index=max(int(sec_satir['vardiya_id'])-1,0), key="atama_duz_vard")
+                        n_tez = st.selectbox("Yeni Tezgah", tez_df.apply(lambda r: f"{r['id']}|{r['kod']} {r['ad']}".strip(), axis=1).tolist(), index=tez_df.index[tez_df['id']==int(sec_satir['tezgah_id'])][0], key="atama_duz_tez")
+                        n_op = st.selectbox("Yeni Operatör", ops_df.apply(lambda r: f"{r['id']}|{r['ad']}",axis=1).tolist(), index=ops_df.index[ops_df['id']==int(sec_satir['operator_id'])][0], key="atama_duz_op")
                         if st.form_submit_button("Atamayı Güncelle"):
-                            n_vard_id = int(n_vard.split("|")[0].strip())
-                            n_tez_id = int(n_tez.split("|")[0].strip())
-                            n_op_id = int(n_op.split("|")[0].strip())
+                            n_vard_id = int(n_vard.split("|")[0])
+                            n_tez_id = int(n_tez.split("|")[0])
+                            n_op_id = int(n_op.split("|")[0])
                             try:
-                                cursor.execute("""
-                                    UPDATE VardiyaAtamalari
-                                    SET tarih=?, vardiya_id=?, tezgah_id=?, operator_id=?
-                                    WHERE id=?
-                                """, (n_tarih.strftime("%Y-%m-%d"), n_vard_id, n_tez_id, n_op_id, sec_id))
+                                cursor.execute("UPDATE VardiyaAtamalari SET tarih=?, vardiya_id=?, tezgah_id=?, operator_id=? WHERE id=?", (n_tarih.strftime("%Y-%m-%d"), n_vard_id, n_tez_id, n_op_id, sec_id))
                                 conn.commit()
                                 st.success("Atama güncellendi.")
                                 st.rerun()
@@ -854,10 +736,7 @@ elif menu == "🛠️ İş Emirleri":
                 with col_sil:
                     st.write("")
                     st.write("")
-                    atama_onay = st.checkbox(
-                        f"ID {sec_id} atamasını silmeyi onaylıyorum",
-                        key=f"atama_sil_onay_{sec_id}"
-                    )
+                    atama_onay = st.checkbox(f"ID {sec_id} atamasını silmeyi onaylıyorum", key=f"atama_sil_onay_{sec_id}")
                     if st.button("🗑️ Atamayı Sil", key="atama_sil_btn", type="secondary"):
                         if atama_onay:
                             cursor.execute("DELETE FROM VardiyaAtamalari WHERE id=?", (sec_id,))
@@ -866,26 +745,11 @@ elif menu == "🛠️ İş Emirleri":
                             st.rerun()
                         else:
                             st.warning("Silme işlemi için önce onay kutusunu işaretleyin.")
-
         st.subheader("İş Emri - Vardiya Operatör Üretim Özeti")
-        ozet_df = pd.read_sql_query("""
-            SELECT
-                U.is_emri_id,
-                S.kod as urun_kod,
-                V.ad as vardiya,
-                O.ad as operator,
-                SUM(U.miktar) as uretim_miktari
-            FROM UretimKayitlari U
-            JOIN IsEmirleri I ON I.id = U.is_emri_id
-            JOIN Stoklar S ON S.id = I.mamul_id
-            JOIN Vardiyalar V ON V.id = U.vardiya_id
-            JOIN Operatorler O ON O.id = U.operator_id
-            GROUP BY U.is_emri_id, S.kod, V.ad, O.ad
-            ORDER BY U.is_emri_id DESC, V.id, O.ad
-        """, conn)
+        ozet_df = pd.read_sql_query("SELECT U.is_emri_id, S.kod as urun_kod, V.ad as vardiya, O.ad as operator, SUM(U.miktar) as uretim_miktari FROM UretimKayitlari U JOIN IsEmirleri I ON I.id = U.is_emri_id JOIN Stoklar S ON S.id = I.mamul_id JOIN Vardiyalar V ON V.id = U.vardiya_id JOIN Operatorler O ON O.id = U.operator_id GROUP BY U.is_emri_id, S.kod, V.ad, O.ad ORDER BY U.is_emri_id DESC, V.id, O.ad", conn)
         st.dataframe(ozet_df, use_container_width=True)
 
-# --- 🏭 PROSES TAKİP ---
+# ---------------------------- 🏭 PROSES TAKİP ----------------------------
 elif menu == "🏭 Proses Takip":
     st.header("🏭 Lot Bazlı Proses Takip")
     asama_turkce = {"KALITE": "🔬 Kalite", "BUKUM": "🔄 Büküm", "ISIL_ISLEM": "🔥 Isıl İşlem", "KAPLAMA": "🎨 Kaplama", "SEVK": "🚚 Sevk"}
@@ -895,23 +759,23 @@ elif menu == "🏭 Proses Takip":
     else:
         for _, row in df_lotlar.iterrows():
             with st.container(border=True):
-                col1, col2 = st.columns([3, 1])
+                col1, col2 = st.columns([3,1])
                 with col1:
                     st.markdown(f"**{row['stok_kodu']}** - {row['lot_no']}")
                     st.caption(f"Miktar: {row['miktar']:.2f} | Aşama: {asama_turkce.get(row['mevcut_asama'], row['mevcut_asama'])}")
                 with col2:
                     if st.button(f"➡️ İlerlet", key=f"ilerlet_{row['lot_no']}"):
-                        asama_sirasi = ["KALITE", "BUKUM", "ISIL_ISLEM", "KAPLAMA", "SEVK"]
+                        asama_sirasi = ["KALITE","BUKUM","ISIL_ISLEM","KAPLAMA","SEVK"]
                         mevcut_idx = asama_sirasi.index(row['mevcut_asama']) if row['mevcut_asama'] in asama_sirasi else 0
-                        if mevcut_idx + 1 < len(asama_sirasi):
-                            yeni_asama = asama_sirasi[mevcut_idx + 1]
+                        if mevcut_idx+1 < len(asama_sirasi):
+                            yeni_asama = asama_sirasi[mevcut_idx+1]
                             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             cursor.execute("INSERT INTO LotAsamaTakip (stok_id, lot_no, asama, son_guncelleme) VALUES (?,?,?,?) ON CONFLICT(stok_id, lot_no) DO UPDATE SET asama=?, son_guncelleme=?", (row['stok_id'], row['lot_no'], yeni_asama, now_str, yeni_asama, now_str))
                             cursor.execute("INSERT INTO LotAsamaGecmis (stok_id, lot_no, asama, tarih, aciklama) VALUES (?,?,?,?,?)", (row['stok_id'], row['lot_no'], yeni_asama, now_str, f"{row['mevcut_asama']} → {yeni_asama}"))
                             conn.commit()
                             st.rerun()
 
-# --- 🚚 SEVKİYAT ---
+# ---------------------------- 🚚 SEVKİYAT ----------------------------
 elif menu == "🚚 Sevkiyat":
     st.header("🚚 Sevkiyat")
     st.subheader("📋 Sevk Geçmişi")
@@ -924,17 +788,17 @@ elif menu == "🚚 Sevkiyat":
         with st.form("sevkiyat_form"):
             urun = st.selectbox("Ürün", mamuller)
             lot_df = pd.read_sql_query("SELECT L.lot_no, L.miktar, COALESCE(T.asama, 'KALITE') as asama FROM LotStok L JOIN Stoklar S ON S.id = L.stok_id LEFT JOIN LotAsamaTakip T ON T.stok_id = L.stok_id AND T.lot_no = L.lot_no WHERE S.kod=? AND L.miktar > 0", conn, params=(urun,))
-            uygun_lotlar = lot_df[lot_df['asama'].isin(['KAPLAMA', 'SEVK'])]
+            uygun_lotlar = lot_df[lot_df['asama'].isin(['KAPLAMA','SEVK'])]
             if uygun_lotlar.empty:
                 st.warning("Sevke hazır lot bulunmuyor.")
                 lot = None
                 max_miktar = 0
             else:
                 lot = st.selectbox("Lot No", uygun_lotlar['lot_no'].tolist())
-                max_miktar = float(uygun_lotlar[uygun_lotlar['lot_no'] == lot]['miktar'].values[0]) if lot else 0
+                max_miktar = float(uygun_lotlar[uygun_lotlar['lot_no']==lot]['miktar'].values[0]) if lot else 0
             miktar = st.number_input("Miktar", min_value=0.1, max_value=max_miktar, format="%.3f")
             if st.form_submit_button("Sevk Et"):
-                if lot and miktar > 0:
+                if lot and miktar>0:
                     stok_id = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (urun,)).fetchone()[0]
                     cursor.execute("UPDATE Stoklar SET miktar = miktar - ? WHERE kod=?", (miktar, urun))
                     cursor.execute("UPDATE LotStok SET miktar = miktar - ? WHERE stok_id=? AND lot_no=?", (miktar, stok_id, lot))
@@ -945,7 +809,7 @@ elif menu == "🚚 Sevkiyat":
     else:
         st.warning("Sevkiyat için mamul bulunmuyor.")
 
-# --- ⚙️ AYARLAR ---
+# ---------------------------- ⚙️ AYARLAR ----------------------------
 elif menu == "⚙️ Ayarlar & Yedek":
     st.header("⚙️ Ayarlar ve Yedekleme")
     t1, t2 = st.tabs(["💾 Yedekleme", "ℹ️ Sistem"])
@@ -956,7 +820,7 @@ elif menu == "⚙️ Ayarlar & Yedek":
     with t2:
         st.write(f"**Uygulama:** {sirket_adi}")
         st.write(f"**Versiyon:** {versiyon}")
-        st.write("**Hammadde Düşüş Sistemi:** ✅ Aktif")
-        st.write("**Çok Katmanlı Reçete:** ✅ Aktif")
+        st.write("**Hammadde Düşüş Sistemi:** Aktif (reçete bazlı, recursive)")
 
+# ---------------------------- BAĞLANTIYI KAPAT ----------------------------
 conn.close()
