@@ -551,7 +551,7 @@ elif menu == "🛠️ İş Emirleri":
         if not df_kapali.empty:
             df_kapali["plana_uyum_%"] = df_kapali.apply(lambda r: (float(r["gerceklesen_uretim"]) / float(r["adet"]) * 100.0) if float(r["adet"]) > 0 else 0.0, axis=1)
             st.dataframe(df_kapali[['kod', 'adet', 'gerceklesen_uretim', 'plana_uyum_%', 'lot_no', 'durum', 'baslangic_tarihi', 'bitis_tarihi']], use_container_width=True)
-        with t4:
+           with t4:
         st.subheader("Operatör ve Tezgah Tanımları")
         c_op, c_tz = st.columns(2)
         
