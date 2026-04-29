@@ -21,11 +21,7 @@ def generate_lot(prefix):
 def get_available_lots_for_process(stok_kodu=None, mevcut_asama=None):
     query = """
         SELECT 
-            S.id as stok_id,
-            S.kod as stok_kodu,
-            S.ad as stok_adi,
-            L.lot_no,
-            L.miktar,
+            S.id as stok_id, S.kod as stok_kodu, S.ad as stok_adi, L.lot_no, L.miktar,
             COALESCE(T.asama, 'KALITE') as mevcut_asama,
             COALESCE(T.son_guncelleme, '-') as son_guncelleme,
             COUNT(DISTINCT U.id) as uretim_sayisi
@@ -33,8 +29,7 @@ def get_available_lots_for_process(stok_kodu=None, mevcut_asama=None):
         JOIN Stoklar S ON S.id = L.stok_id
         LEFT JOIN LotAsamaTakip T ON T.stok_id = L.stok_id AND T.lot_no = L.lot_no
         LEFT JOIN UretimKayitlari U ON U.mamul_id = L.stok_id
-        WHERE L.miktar > 0
-          AND UPPER(COALESCE(S.tip, '')) NOT IN ('HAM', 'HAMMADDE')
+        WHERE L.miktar > 0 AND UPPER(COALESCE(S.tip, '')) NOT IN ('HAM', 'HAMMADDE')
     """
     params = []
     if stok_kodu:
@@ -783,17 +778,122 @@ elif menu == "🏭 Proses Takip":
 # ---------------------------- 🚚 SEVKİYAT ----------------------------
 elif menu == "🚚 Sevkiyat":
     st.header("🚚 Sevkiyat")
+    
+    # Proses takibinden gelen yönlendirmeyi kontrol et
+    if 'sevk_urun' in st.session_state:
+        default_urun = st.session_state['sevk_urun']
+        default_lot = st.session_state.get('sevk_lot', '')
+        st.info(f"🎯 Proses takibinden yönlendirildiniz: **{default_urun}** - **{default_lot}**")
+    else:
+        default_urun = None
+        default_lot = None
+    
     st.subheader("📋 Sevk Geçmişi")
-    df_sevk = pd.read_sql_query("SELECT H.tarih, S.kod, S.ad, H.lot_no, H.hareket_miktari FROM Hareketler H JOIN Stoklar S ON S.id = H.stok_id WHERE H.tip = 'SEVK' ORDER BY H.id DESC LIMIT 50", conn)
-    st.dataframe(df_sevk, use_container_width=True)
+    sevk_urun_ara = st.text_input("Ürün kodu ile filtrele", value="", key="sevk_gecmis_urun").strip().upper()
+    sevk_bas = st.date_input("Başlangıç Tarihi", value=datetime.now().date() - timedelta(days=30), key="sevk_gecmis_bas")
+    sevk_bit = st.date_input("Bitiş Tarihi", value=datetime.now().date(), key="sevk_gecmis_bit")
+    sevk_sql = """
+        SELECT
+            H.id,
+            H.tarih,
+            S.kod AS urun_kod,
+            S.ad AS urun_adi,
+            H.lot_no,
+            H.hareket_miktari AS sevk_miktari
+        FROM Hareketler H
+        JOIN Stoklar S ON S.id = H.stok_id
+        WHERE H.tip = 'SEVK'
+          AND DATE(H.tarih) BETWEEN ? AND ?
+    """
+    sevk_params = [sevk_bas.strftime("%Y-%m-%d"), sevk_bit.strftime("%Y-%m-%d")]
+    if sevk_urun_ara:
+        sevk_sql += " AND UPPER(S.kod) LIKE ?"
+        sevk_params.append(f"%{sevk_urun_ara}%")
+    sevk_sql += " ORDER BY H.id DESC"
+    df_sevk_gecmis = pd.read_sql_query(sevk_sql, conn, params=sevk_params)
+    st.dataframe(
+        df_sevk_gecmis[['tarih', 'urun_kod', 'urun_adi', 'lot_no', 'sevk_miktari']],
+        use_container_width=True
+    )
+    if not df_sevk_gecmis.empty:
+        toplam_sevk = float(df_sevk_gecmis['sevk_miktari'].sum())
+        st.caption(f"Toplam sevk miktarı: {toplam_sevk:.3f}")
+
     st.divider()
     st.subheader("🚚 Yeni Sevkiyat")
-    mamuller = pd.read_sql_query("SELECT kod FROM Stoklar WHERE tip='MAM' ORDER BY kod", conn)['kod'].tolist()
-    if mamuller:
-        with st.form("sevkiyat_form"):
-            urun = st.selectbox("Ürün", mamuller)
-            lot_df = pd.read_sql_query("SELECT L.lot_no, L.miktar, COALESCE(T.asama, 'KALITE') as asama FROM LotStok L JOIN Stoklar S ON S.id = L.stok_id LEFT JOIN LotAsamaTakip T ON T.stok_id = L.stok_id AND T.lot_no = L.lot_no WHERE S.kod=? AND L.miktar > 0", conn, params=(urun,))
-            uygun_lotlar = lot_df[lot_df['asama']            uygun_lotlar = lot_df[lot_df['asama'].isin(['KAPLAMA', 'SEVK'])]
+    df_m = pd.read_sql_query("SELECT kod, miktar FROM Stoklar", conn)
+    urun_ops = [k for k in df_m['kod'].tolist() if pd.notna(k) and str(k).strip() != ""]
+    if not urun_ops:
+        st.warning("Sevkiyat icin secilebilir urun yok. Once stok karti olusturun.")
+        st.stop()
+
+    # Default ürün seçimi
+    if default_urun and default_urun in urun_ops:
+        default_index = urun_ops.index(default_urun)
+    else:
+        default_index = 0
+    
+    s_kod = st.selectbox("Ürün", urun_ops, index=default_index, key="sev_urun")
+    
+    lot_df = pd.read_sql_query("""
+        SELECT L.lot_no, L.miktar, COALESCE(T.asama, 'KALITE') as asama
+        FROM LotStok L
+        JOIN Stoklar S ON S.id = L.stok_id
+        LEFT JOIN LotAsamaTakip T ON T.stok_id = L.stok_id AND T.lot_no = L.lot_no
+        WHERE S.kod=? AND L.miktar > 0
+        ORDER BY 
+            CASE WHEN L.lot_no = ? THEN 0 ELSE 1 END,
+            L.id
+    """, conn, params=(s_kod, default_lot if default_lot else ''))
+    
+    stok_row = cursor.execute("SELECT id, miktar FROM Stoklar WHERE kod=?", (s_kod,)).fetchone()
+    if not stok_row:
+        st.error("Secilen urun stok kaydinda bulunamadi.")
+        st.stop()
+    stok_id = int(stok_row[0])
+    mevcut = float(stok_row[1] if stok_row[1] is not None else 0.0)
+    lot_toplam = float(lot_df['miktar'].sum()) if not lot_df.empty else 0.0
+    devir_miktar = max(float(mevcut) - float(lot_toplam), 0.0)
+
+    if lot_df.empty and mevcut > 0:
+        st.info(f"Bu urunde lot kaydi yok ama toplam stok var: {mevcut:.3f}.")
+        st.caption("Eski/lotsuz stoklari sevk edebilmek icin devir lotu olusturabilirsiniz.")
+        if st.button("🔁 Mevcut Stoğu Devire Aktar", key="devire_aktar"):
+            devir_lot = f"DEVIR-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            cursor.execute(
+                "INSERT INTO LotStok (stok_id, lot_no, miktar) VALUES (?,?,?) ON CONFLICT(stok_id, lot_no) DO UPDATE SET miktar = miktar + excluded.miktar",
+                (stok_id, devir_lot, float(mevcut))
+            )
+            cursor.execute(
+                "INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih) VALUES (?,?,'DEVIR',?,?)",
+                (stok_id, float(mevcut), devir_lot, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            )
+            conn.commit()
+            st.success(f"Devir lotu olusturuldu: {devir_lot}")
+            st.rerun()
+
+    if devir_miktar > 0:
+        st.info(f"Lot disi kalan stok tespit edildi: {devir_miktar:.3f}")
+        if st.button("➕ Lot Dışı Stoğu Devire Ekle", key="devir_ekle"):
+            devir_lot = f"DEVIR-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            cursor.execute(
+                "INSERT INTO LotStok (stok_id, lot_no, miktar) VALUES (?,?,?) ON CONFLICT(stok_id, lot_no) DO UPDATE SET miktar = miktar + excluded.miktar",
+                (stok_id, devir_lot, devir_miktar)
+            )
+            cursor.execute(
+                "INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih) VALUES (?,?,'DEVIR',?,?)",
+                (stok_id, devir_miktar, devir_lot, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            )
+            conn.commit()
+            st.success(f"Lot disi stok devire eklendi: {devir_lot}")
+            st.rerun()
+
+    with st.form("sev"):
+        lot_var = not lot_df.empty
+        if lot_var:
+            # Sadece KAPLAMA veya SEVK aşamasındaki lotları göster
+            uygun_lotlar = lot_df[lot_df['asama'].isin(['KAPLAMA', 'SEVK'])]
+            
             if uygun_lotlar.empty:
                 st.warning("Sevke hazır lot bulunmuyor. (KAPLAMA veya SEVK aşamasında olmalı)")
                 s_lot = None
@@ -801,48 +901,61 @@ elif menu == "🚚 Sevkiyat":
                 s_mik = st.number_input("Miktar", min_value=0.1, value=0.1, step=0.1, format="%.3f", disabled=True)
             else:
                 lot_ops = uygun_lotlar['lot_no'].tolist()
-                s_lot = st.selectbox("Sevk Lot No", lot_ops)
-                lot_miktar = float(uygun_lotlar[uygun_lotlar['lot_no'] == s_lot]['miktar'].values[0])
-                s_mik = st.number_input("Miktar", min_value=0.1, max_value=lot_miktar, value=min(0.1, lot_miktar), step=0.1, format="%.3f")
-            
-            if st.form_submit_button("Gönder", use_container_width=True):
-                if not s_lot:
-                    st.error("Sevkiyat için uygun lot bulunamadı!")
+                # Default lot seçimi
+                if default_lot and default_lot in lot_ops:
+                    default_lot_index = lot_ops.index(default_lot)
                 else:
-                    asama_kayit = cursor.execute("""
-                        SELECT asama FROM LotAsamaTakip
-                        WHERE stok_id=(SELECT id FROM Stoklar WHERE kod=?) AND lot_no=?
-                    """, (s_kod, s_lot)).fetchone()
-                    mevcut_asama = asama_kayit[0] if asama_kayit else "KALITE"
-                    if mevcut_asama not in ("KAPLAMA", "SEVK"):
-                        st.error(f"Bu lot sevke hazir degil. Mevcut asama: {mevcut_asama}. Sevk icin KAPLAMA veya SEVK olmalidir.")
-                    elif mevcut >= s_mik and lot_miktar >= s_mik:
-                        try:
-                            cursor.execute("UPDATE Stoklar SET miktar = miktar - ? WHERE kod=?", (s_mik, s_kod))
-                            cursor.execute("UPDATE LotStok SET miktar = miktar - ? WHERE stok_id=(SELECT id FROM Stoklar WHERE kod=?) AND lot_no=?", (s_mik, s_kod, s_lot))
-                            cursor.execute("INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih) VALUES ((SELECT id FROM Stoklar WHERE kod=?),?,'SEVK',?,?)", (s_kod, s_mik, s_lot, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            cursor.execute("""
-                                INSERT INTO LotAsamaTakip (stok_id, lot_no, asama, son_guncelleme)
-                                VALUES ((SELECT id FROM Stoklar WHERE kod=?), ?, 'SEVK', ?)
-                                ON CONFLICT(stok_id, lot_no) DO UPDATE SET
-                                    asama='SEVK',
-                                    son_guncelleme=excluded.son_guncelleme
-                            """, (s_kod, s_lot, now_str))
-                            cursor.execute("""
-                                INSERT INTO LotAsamaGecmis (stok_id, lot_no, asama, tarih, aciklama)
-                                VALUES ((SELECT id FROM Stoklar WHERE kod=?), ?, 'SEVK', ?, 'KAPLAMA asamasindan sevke cikis')
-                            """, (s_kod, s_lot, now_str))
-                            conn.commit()
-                            st.success("Sevkiyat tamamlandı.")
-                            st.rerun()
-                        except Exception as e:
-                            conn.rollback()
-                            st.error(f"Sevkiyat hatası: {e}")
-                    else:
-                        st.error("Stok yetersiz!")
-    else:
-        st.warning("Sevkiyat için mamul bulunmuyor.")
+                    default_lot_index = 0
+                s_lot = st.selectbox("Sevk Lot No", lot_ops, index=default_lot_index)
+                lot_miktar = float(uygun_lotlar[uygun_lotlar['lot_no'] == s_lot]['miktar'].values[0])
+                s_mik = st.number_input("Miktar", min_value=0.1, max_value=lot_miktar, value=min(1.0, lot_miktar), step=0.1, format="%.3f")
+        else:
+            st.warning("Bu ürün için sevk edilebilir lot yok. Önce lot bazlı stok girişi/üretim yapın.")
+            s_lot = None
+            lot_miktar = 0.0
+            s_mik = st.number_input("Miktar", min_value=0.1, value=0.1, step=0.1, format="%.3f", disabled=True)
+        
+        if st.form_submit_button("Gönder", use_container_width=True):
+            if not s_lot:
+                st.error("Sevkiyat için uygun lot bulunamadı!")
+            else:
+                asama_kayit = cursor.execute("""
+                    SELECT asama FROM LotAsamaTakip
+                    WHERE stok_id=(SELECT id FROM Stoklar WHERE kod=?) AND lot_no=?
+                """, (s_kod, s_lot)).fetchone()
+                mevcut_asama = asama_kayit[0] if asama_kayit else "KALITE"
+                if mevcut_asama not in ("KAPLAMA", "SEVK"):
+                    st.error(f"Bu lot sevke hazir degil. Mevcut asama: {mevcut_asama}. Sevk icin KAPLAMA veya SEVK olmalidir.")
+                elif mevcut >= s_mik and lot_miktar >= s_mik:
+                    try:
+                        cursor.execute("UPDATE Stoklar SET miktar = miktar - ? WHERE kod=?", (s_mik, s_kod))
+                        cursor.execute("UPDATE LotStok SET miktar = miktar - ? WHERE stok_id=(SELECT id FROM Stoklar WHERE kod=?) AND lot_no=?", (s_mik, s_kod, s_lot))
+                        cursor.execute("INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih) VALUES ((SELECT id FROM Stoklar WHERE kod=?),?,'SEVK',?,?)", (s_kod, s_mik, s_lot, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        cursor.execute("""
+                            INSERT INTO LotAsamaTakip (stok_id, lot_no, asama, son_guncelleme)
+                            VALUES ((SELECT id FROM Stoklar WHERE kod=?), ?, 'SEVK', ?)
+                            ON CONFLICT(stok_id, lot_no) DO UPDATE SET
+                                asama='SEVK',
+                                son_guncelleme=excluded.son_guncelleme
+                        """, (s_kod, s_lot, now_str))
+                        cursor.execute("""
+                            INSERT INTO LotAsamaGecmis (stok_id, lot_no, asama, tarih, aciklama)
+                            VALUES ((SELECT id FROM Stoklar WHERE kod=?), ?, 'SEVK', ?, 'KAPLAMA asamasindan sevke cikis')
+                        """, (s_kod, s_lot, now_str))
+                        conn.commit()
+                        st.success("Sevkiyat tamamlandı.")
+                        # Session temizle
+                        if 'sevk_urun' in st.session_state:
+                            del st.session_state['sevk_urun']
+                        if 'sevk_lot' in st.session_state:
+                            del st.session_state['sevk_lot']
+                        st.rerun()
+                    except Exception as e:
+                        conn.rollback()
+                        st.error(f"Sevkiyat hatası: {e}")
+                else:
+                    st.error("Stok yetersiz!")
 
 # ---------------------------- ⚙️ AYARLAR & YEDEK ----------------------------
 elif menu == "⚙️ Ayarlar & Yedek":
