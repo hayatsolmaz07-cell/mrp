@@ -776,6 +776,7 @@ elif menu == "🏭 Proses Takip":
                             st.rerun()
 
 # ---------------------------- 🚚 SEVKİYAT ----------------------------
+# --- 🚚 SEVKİYAT (DÜZELTİLMİŞ) ---
 elif menu == "🚚 Sevkiyat":
     st.header("🚚 Sevkiyat")
     st.subheader("📋 Sevk Geçmişi")
@@ -792,20 +793,33 @@ elif menu == "🚚 Sevkiyat":
             if uygun_lotlar.empty:
                 st.warning("Sevke hazır lot bulunmuyor.")
                 lot = None
-                max_miktar = 0
+                max_miktar = 0.0
+                # HATA DÜZELTİLDİ: max_miktar float olarak tanımlandı
+                s_mik = st.number_input("Miktar", min_value=0.1, max_value=1.0, value=0.1, format="%.3f", disabled=True)
             else:
                 lot = st.selectbox("Lot No", uygun_lotlar['lot_no'].tolist())
-                max_miktar = float(uygun_lotlar[uygun_lotlar['lot_no']==lot]['miktar'].values[0]) if lot else 0
-            miktar = st.number_input("Miktar", min_value=0.1, max_value=max_miktar, format="%.3f")
-            if st.form_submit_button("Sevk Et"):
-                if lot and miktar>0:
-                    stok_id = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (urun,)).fetchone()[0]
-                    cursor.execute("UPDATE Stoklar SET miktar = miktar - ? WHERE kod=?", (miktar, urun))
-                    cursor.execute("UPDATE LotStok SET miktar = miktar - ? WHERE stok_id=? AND lot_no=?", (miktar, stok_id, lot))
-                    cursor.execute("INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih) VALUES (?,?,'SEVK',?,?)", (stok_id, miktar, lot, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                    conn.commit()
-                    st.success("Sevkiyat tamamlandı.")
-                    st.rerun()
+                # DÜZELTME: max_miktar'ı FLOAT'a çevir (eğer None veya str ise 0.0 yap)
+                max_miktar_raw = uygun_lotlar[uygun_lotlar['lot_no'] == lot]['miktar'].values[0] if lot else 0.0
+                max_miktar = float(max_miktar_raw) if max_miktar_raw is not None else 0.0
+                if max_miktar <= 0:
+                    max_miktar = 1.0
+                s_mik = st.number_input("Miktar", min_value=0.1, max_value=max_miktar, value=min(0.1, max_miktar), format="%.3f")
+            
+            if st.form_submit_button("Sevk Et", use_container_width=True):
+                if lot and s_mik > 0:
+                    try:
+                        stok_id = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (urun,)).fetchone()[0]
+                        cursor.execute("UPDATE Stoklar SET miktar = miktar - ? WHERE kod=?", (float(s_mik), urun))
+                        cursor.execute("UPDATE LotStok SET miktar = miktar - ? WHERE stok_id=? AND lot_no=?", (float(s_mik), stok_id, lot))
+                        cursor.execute("INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih) VALUES (?,?,'SEVK',?,?)", (stok_id, float(s_mik), lot, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                        conn.commit()
+                        st.success("Sevkiyat tamamlandı.")
+                        st.rerun()
+                    except Exception as e:
+                        conn.rollback()
+                        st.error(f"Hata: {e}")
+                else:
+                    st.error("Lütfen lot ve geçerli bir miktar seçin.")
     else:
         st.warning("Sevkiyat için mamul bulunmuyor.")
 
