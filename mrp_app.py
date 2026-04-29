@@ -551,28 +551,339 @@ elif menu == "🛠️ İş Emirleri":
         if not df_kapali.empty:
             df_kapali["plana_uyum_%"] = df_kapali.apply(lambda r: (float(r["gerceklesen_uretim"]) / float(r["adet"]) * 100.0) if float(r["adet"]) > 0 else 0.0, axis=1)
             st.dataframe(df_kapali[['kod', 'adet', 'gerceklesen_uretim', 'plana_uyum_%', 'lot_no', 'durum', 'baslangic_tarihi', 'bitis_tarihi']], use_container_width=True)
-    with t4:
+        with t4:
         st.subheader("Operatör ve Tezgah Tanımları")
         c_op, c_tz = st.columns(2)
+        
         with c_op:
             with st.form("op_form"):
-                op_ad = st.text_input("Operatör Adı")
+                op_ad = st.text_input("Operatör Adı").strip()
                 if st.form_submit_button("Operatör Ekle"):
                     if op_ad:
                         cursor.execute("INSERT OR IGNORE INTO Operatorler (ad) VALUES (?)", (op_ad,))
                         conn.commit()
+                        st.success("Operatör kaydedildi.")
                         st.rerun()
-            st.dataframe(pd.read_sql_query("SELECT id, ad FROM Operatorler", conn), use_container_width=True)
+            op_list_df = pd.read_sql_query("SELECT id, ad FROM Operatorler ORDER BY ad", conn)
+            if not op_list_df.empty:
+                st.markdown("##### Operatör Düzelt / Sil")
+                sec_op = st.selectbox(
+                    "Operatör seç",
+                    op_list_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist(),
+                    key="op_duzenle_sec"
+                )
+                sec_op_id = int(sec_op.split("|")[0].strip())
+                sec_op_ad = op_list_df[op_list_df['id'] == sec_op_id]['ad'].values[0]
+                with st.form("op_duzelt_form"):
+                    yeni_op_ad = st.text_input("Yeni Operatör Adı", value=str(sec_op_ad)).strip()
+                    c_op1, c_op2 = st.columns(2)
+                    guncel = c_op1.form_submit_button("Güncelle")
+                    sil = c_op2.form_submit_button("Sil", type="secondary")
+                    if guncel:
+                        if yeni_op_ad:
+                            try:
+                                cursor.execute("UPDATE Operatorler SET ad=? WHERE id=?", (yeni_op_ad, sec_op_id))
+                                conn.commit()
+                                st.success("Operatör güncellendi.")
+                                st.rerun()
+                            except sqlite3.IntegrityError:
+                                st.error("Bu operatör adı zaten mevcut.")
+                    if sil:
+                        st.warning("Silme işlemi geri alınamaz.")
+                        op_onay = st.checkbox(f"{sec_op_ad} kaydını silmeyi onaylıyorum", key=f"op_sil_onay_{sec_op_id}")
+                        if op_onay:
+                            try:
+                                cursor.execute("DELETE FROM Operatorler WHERE id=?", (sec_op_id,))
+                                conn.commit()
+                                st.success("Operatör silindi.")
+                                st.rerun()
+                            except sqlite3.IntegrityError:
+                                st.error("Bu operatör atama/üretim kayıtlarında kullanılıyor. Önce bağlı kayıtları güncelleyin.")
+                        else:
+                            st.info("Silmek için onay kutusunu işaretleyin.")
+        
         with c_tz:
             with st.form("tz_form"):
-                tz_kod = st.text_input("Tezgah Kodu")
-                tz_ad = st.text_input("Tezgah Adı")
+                tz_kod = st.text_input("Tezgah Kodu").strip().upper()
+                tz_ad = st.text_input("Tezgah Adı").strip()
                 if st.form_submit_button("Tezgah Ekle"):
                     if tz_kod:
                         cursor.execute("INSERT OR IGNORE INTO Tezgahlar (kod, ad) VALUES (?,?)", (tz_kod, tz_ad))
                         conn.commit()
+                        st.success("Tezgah kaydedildi.")
                         st.rerun()
-            st.dataframe(pd.read_sql_query("SELECT id, kod, ad FROM Tezgahlar", conn), use_container_width=True)
+            tz_list_df = pd.read_sql_query("SELECT id, kod, COALESCE(ad, '') as ad FROM Tezgahlar ORDER BY kod", conn)
+            if not tz_list_df.empty:
+                st.markdown("##### Tezgah Düzelt / Sil")
+                sec_tz = st.selectbox(
+                    "Tezgah seç",
+                    tz_list_df.apply(lambda r: f"{r['id']} | {r['kod']} {r['ad']}".strip(), axis=1).tolist(),
+                    key="tz_duzenle_sec"
+                )
+                sec_tz_id = int(sec_tz.split("|")[0].strip())
+                sec_tz_satir = tz_list_df[tz_list_df['id'] == sec_tz_id].iloc[0]
+                with st.form("tz_duzelt_form"):
+                    yeni_tz_kod = st.text_input("Yeni Tezgah Kodu", value=str(sec_tz_satir['kod'])).strip().upper()
+                    yeni_tz_ad = st.text_input("Yeni Tezgah Adı", value=str(sec_tz_satir['ad'])).strip()
+                    c_tz1, c_tz2 = st.columns(2)
+                    tz_guncel = c_tz1.form_submit_button("Güncelle")
+                    tz_sil = c_tz2.form_submit_button("Sil", type="secondary")
+                    if tz_guncel:
+                        if yeni_tz_kod:
+                            try:
+                                cursor.execute("UPDATE Tezgahlar SET kod=?, ad=? WHERE id=?", (yeni_tz_kod, yeni_tz_ad, sec_tz_id))
+                                conn.commit()
+                                st.success("Tezgah güncellendi.")
+                                st.rerun()
+                            except sqlite3.IntegrityError:
+                                st.error("Bu tezgah kodu zaten mevcut.")
+                    if tz_sil:
+                        st.warning("Silme işlemi geri alınamaz.")
+                        tz_onay = st.checkbox(f"{sec_tz_satir['kod']} kaydını silmeyi onaylıyorum", key=f"tz_sil_onay_{sec_tz_id}")
+                        if tz_onay:
+                            try:
+                                cursor.execute("DELETE FROM Tezgahlar WHERE id=?", (sec_tz_id,))
+                                conn.commit()
+                                st.success("Tezgah silindi.")
+                                st.rerun()
+                            except sqlite3.IntegrityError:
+                                st.error("Bu tezgah atama/üretim kayıtlarında kullanılıyor. Önce bağlı kayıtları güncelleyin.")
+                        else:
+                            st.info("Silmek için onay kutusunu işaretleyin.")
+
+        st.subheader("Haftalık Rotasyon (Sabah/Aksam)")
+        ops_df = pd.read_sql_query("SELECT id, ad FROM Operatorler ORDER BY ad", conn)
+        tez_df = pd.read_sql_query("SELECT id, kod, COALESCE(ad, '') as ad FROM Tezgahlar ORDER BY kod", conn)
+        if ops_df.empty or tez_df.empty:
+            st.info("Rotasyon tanımlamak için önce operatör ve tezgah tanımlayın.")
+        else:
+            with st.form("rotasyon_form"):
+                r_tez = st.selectbox(
+                    "Tezgah",
+                    tez_df.apply(lambda r: f"{r['id']} | {r['kod']} {r['ad']}".strip(), axis=1).tolist(),
+                    key="rot_tez"
+                )
+                r_op_a = st.selectbox(
+                    "Operatör A (başlangıç haftasında SABAH)",
+                    ops_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist(),
+                    key="rot_op_a"
+                )
+                r_op_b = st.selectbox(
+                    "Operatör B (başlangıç haftasında AKŞAM)",
+                    ops_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist(),
+                    key="rot_op_b"
+                )
+                r_bas = st.date_input("Rotasyon Başlangıç Tarihi", value=datetime.now().date(), key="rot_bas")
+                if st.form_submit_button("Rotasyonu Kaydet"):
+                    tez_id = int(r_tez.split("|")[0].strip())
+                    op_a_id = int(r_op_a.split("|")[0].strip())
+                    op_b_id = int(r_op_b.split("|")[0].strip())
+                    if op_a_id == op_b_id:
+                        st.error("Operatör A ve B farklı olmalıdır.")
+                    else:
+                        cursor.execute("""
+                            INSERT INTO HaftalikRotasyonlar (tezgah_id, operator_a_id, operator_b_id, baslangic_tarihi)
+                            VALUES (?,?,?,?)
+                            ON CONFLICT(tezgah_id) DO UPDATE SET
+                                operator_a_id=excluded.operator_a_id,
+                                operator_b_id=excluded.operator_b_id,
+                                baslangic_tarihi=excluded.baslangic_tarihi
+                        """, (tez_id, op_a_id, op_b_id, r_bas.strftime("%Y-%m-%d")))
+                        conn.commit()
+                        st.success("Haftalık rotasyon kaydedildi.")
+                        st.rerun()
+
+            rot_df = pd.read_sql_query("""
+                SELECT
+                    R.id,
+                    T.kod as tezgah_kod,
+                    COALESCE(T.ad, '') as tezgah_ad,
+                    OA.ad as operator_a,
+                    OB.ad as operator_b,
+                    R.baslangic_tarihi
+                FROM HaftalikRotasyonlar R
+                JOIN Tezgahlar T ON T.id = R.tezgah_id
+                JOIN Operatorler OA ON OA.id = R.operator_a_id
+                JOIN Operatorler OB ON OB.id = R.operator_b_id
+                ORDER BY T.kod
+            """, conn)
+            if not rot_df.empty:
+                st.caption("Kural: çift haftada sabah=A / akşam=B, tek haftada sabah=B / akşam=A")
+                st.dataframe(rot_df[['id', 'tezgah_kod', 'tezgah_ad', 'operator_a', 'operator_b', 'baslangic_tarihi']], use_container_width=True)
+
+                st.markdown("##### Rotasyon Önizleme (Bu Hafta + 4 Hafta)")
+                bugun = datetime.now().date()
+                hafta_basi = bugun - timedelta(days=bugun.weekday())
+                onizleme_satirlari = []
+                for _, rr in rot_df.iterrows():
+                    bas_tarih = datetime.strptime(str(rr['baslangic_tarihi']), "%Y-%m-%d").date()
+                    for i in range(5):
+                        h_bas = hafta_basi + timedelta(days=7 * i)
+                        hafta_farki = (h_bas - bas_tarih).days // 7
+                        cift_hafta = (hafta_farki % 2 == 0)
+                        sabah_op = rr['operator_a'] if cift_hafta else rr['operator_b']
+                        aksam_op = rr['operator_b'] if cift_hafta else rr['operator_a']
+                        onizleme_satirlari.append({
+                            "tezgah_kod": rr['tezgah_kod'],
+                            "tezgah_ad": rr['tezgah_ad'],
+                            "hafta_baslangici": h_bas.strftime("%Y-%m-%d"),
+                            "sabah_07_15": sabah_op,
+                            "aksam_15_23": aksam_op
+                        })
+                df_rot_oniz = pd.DataFrame(onizleme_satirlari).sort_values(["tezgah_kod", "hafta_baslangici"])
+                st.dataframe(df_rot_oniz, use_container_width=True)
+
+                sec_rot = st.selectbox(
+                    "Silinecek rotasyon",
+                    rot_df['id'].tolist(),
+                    format_func=lambda x: f"ID {x} - {rot_df[rot_df['id'] == x]['tezgah_kod'].values[0]}",
+                    key="rot_sil_sec"
+                )
+                if st.button("🗑️ Rotasyonu Sil", key="rot_sil_btn", type="secondary"):
+                    cursor.execute("DELETE FROM HaftalikRotasyonlar WHERE id=?", (int(sec_rot),))
+                    conn.commit()
+                    st.success("Rotasyon silindi.")
+                    st.rerun()
+
+        st.subheader("Vardiya Ataması")
+        ops_df = pd.read_sql_query("SELECT id, ad FROM Operatorler ORDER BY ad", conn)
+        tez_df = pd.read_sql_query("SELECT id, kod, COALESCE(ad, '') as ad FROM Tezgahlar ORDER BY kod", conn)
+        vard_df = pd.read_sql_query("SELECT id, ad FROM Vardiyalar ORDER BY id", conn)
+        if ops_df.empty or tez_df.empty:
+            st.warning("Atama için önce operatör ve tezgah tanımlayın.")
+        else:
+            with st.form("atama_form"):
+                a_tarih = st.date_input("Atama Tarihi", value=datetime.now().date())
+                a_vardiyalar = st.multiselect("Vardiyalar", vard_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist())
+                a_tezler = st.multiselect("Tezgahlar", tez_df.apply(lambda r: f"{r['id']} | {r['kod']} {r['ad']}".strip(), axis=1).tolist())
+                a_op = st.selectbox("Operatör", ops_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist())
+                if st.form_submit_button("Atamayı Kaydet"):
+                    op_id = int(a_op.split("|")[0].strip())
+                    if not a_vardiyalar:
+                        st.error("En az bir vardiya secin.")
+                    elif not a_tezler:
+                        st.error("En az bir tezgah secin.")
+                    else:
+                        for a_vard in a_vardiyalar:
+                            vard_id = int(a_vard.split("|")[0].strip())
+                            for a_tez in a_tezler:
+                                tez_id = int(a_tez.split("|")[0].strip())
+                                cursor.execute("""
+                                    INSERT INTO VardiyaAtamalari (tarih, vardiya_id, tezgah_id, operator_id)
+                                    VALUES (?, ?, ?, ?)
+                                    ON CONFLICT(tarih, vardiya_id, tezgah_id)
+                                    DO UPDATE SET operator_id=excluded.operator_id
+                                """, (a_tarih.strftime("%Y-%m-%d"), vard_id, tez_id, op_id))
+                        conn.commit()
+                        st.success(f"Vardiya atamasi kaydedildi. Vardiya: {len(a_vardiyalar)} | Tezgah: {len(a_tezler)}")
+                        st.rerun()
+            st.markdown("#### Atama Düzelt / Sil")
+            atama_df = pd.read_sql_query("""
+                SELECT
+                    A.id,
+                    A.tarih,
+                    A.vardiya_id,
+                    V.ad as vardiya_ad,
+                    A.tezgah_id,
+                    T.kod as tezgah_kod,
+                    COALESCE(T.ad, '') as tezgah_ad,
+                    A.operator_id,
+                    O.ad as operator_ad
+                FROM VardiyaAtamalari A
+                JOIN Vardiyalar V ON V.id = A.vardiya_id
+                JOIN Tezgahlar T ON T.id = A.tezgah_id
+                JOIN Operatorler O ON O.id = A.operator_id
+                ORDER BY A.tarih DESC, A.vardiya_id, T.kod
+            """, conn)
+            if atama_df.empty:
+                st.info("Henüz atama kaydı yok.")
+            else:
+                st.dataframe(
+                    atama_df[['id', 'tarih', 'vardiya_ad', 'tezgah_kod', 'tezgah_ad', 'operator_ad']],
+                    use_container_width=True
+                )
+                secenekler = atama_df.apply(
+                    lambda r: f"{r['id']} | {r['tarih']} | {r['vardiya_ad']} | {r['tezgah_kod']} | {r['operator_ad']}",
+                    axis=1
+                ).tolist()
+                secim = st.selectbox("Düzenlenecek/Silinecek atama", secenekler, key="atama_duzenle_sec")
+                sec_id = int(secim.split("|")[0].strip())
+                sec_satir = atama_df[atama_df['id'] == sec_id].iloc[0]
+
+                col_duz, col_sil = st.columns([0.7, 0.3])
+                with col_duz:
+                    with st.form("atama_duzelt_form"):
+                        n_tarih = st.date_input(
+                            "Yeni Tarih",
+                            value=datetime.strptime(sec_satir['tarih'], "%Y-%m-%d").date(),
+                            key="atama_duz_tarih"
+                        )
+                        n_vard = st.selectbox(
+                            "Yeni Vardiya",
+                            vard_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist(),
+                            index=max(int(sec_satir['vardiya_id']) - 1, 0),
+                            key="atama_duz_vard"
+                        )
+                        n_tez = st.selectbox(
+                            "Yeni Tezgah",
+                            tez_df.apply(lambda r: f"{r['id']} | {r['kod']} {r['ad']}".strip(), axis=1).tolist(),
+                            index=tez_df.index[tez_df['id'] == int(sec_satir['tezgah_id'])][0],
+                            key="atama_duz_tez"
+                        )
+                        n_op = st.selectbox(
+                            "Yeni Operatör",
+                            ops_df.apply(lambda r: f"{r['id']} | {r['ad']}", axis=1).tolist(),
+                            index=ops_df.index[ops_df['id'] == int(sec_satir['operator_id'])][0],
+                            key="atama_duz_op"
+                        )
+                        if st.form_submit_button("Atamayı Güncelle"):
+                            n_vard_id = int(n_vard.split("|")[0].strip())
+                            n_tez_id = int(n_tez.split("|")[0].strip())
+                            n_op_id = int(n_op.split("|")[0].strip())
+                            try:
+                                cursor.execute("""
+                                    UPDATE VardiyaAtamalari
+                                    SET tarih=?, vardiya_id=?, tezgah_id=?, operator_id=?
+                                    WHERE id=?
+                                """, (n_tarih.strftime("%Y-%m-%d"), n_vard_id, n_tez_id, n_op_id, sec_id))
+                                conn.commit()
+                                st.success("Atama güncellendi.")
+                                st.rerun()
+                            except sqlite3.IntegrityError:
+                                st.error("Bu tarih-vardiya-tezgah için zaten başka bir atama var.")
+                with col_sil:
+                    st.write("")
+                    st.write("")
+                    atama_onay = st.checkbox(
+                        f"ID {sec_id} atamasını silmeyi onaylıyorum",
+                        key=f"atama_sil_onay_{sec_id}"
+                    )
+                    if st.button("🗑️ Atamayı Sil", key="atama_sil_btn", type="secondary"):
+                        if atama_onay:
+                            cursor.execute("DELETE FROM VardiyaAtamalari WHERE id=?", (sec_id,))
+                            conn.commit()
+                            st.success("Atama silindi.")
+                            st.rerun()
+                        else:
+                            st.warning("Silme işlemi için önce onay kutusunu işaretleyin.")
+
+        st.subheader("İş Emri - Vardiya Operatör Üretim Özeti")
+        ozet_df = pd.read_sql_query("""
+            SELECT
+                U.is_emri_id,
+                S.kod as urun_kod,
+                V.ad as vardiya,
+                O.ad as operator,
+                SUM(U.miktar) as uretim_miktari
+            FROM UretimKayitlari U
+            JOIN IsEmirleri I ON I.id = U.is_emri_id
+            JOIN Stoklar S ON S.id = I.mamul_id
+            JOIN Vardiyalar V ON V.id = U.vardiya_id
+            JOIN Operatorler O ON O.id = U.operator_id
+            GROUP BY U.is_emri_id, S.kod, V.ad, O.ad
+            ORDER BY U.is_emri_id DESC, V.id, O.ad
+        """, conn)
+        st.dataframe(ozet_df, use_container_width=True)
 
 # --- 🏭 PROSES TAKİP ---
 elif menu == "🏭 Proses Takip":
