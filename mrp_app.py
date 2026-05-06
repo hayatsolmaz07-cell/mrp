@@ -609,20 +609,49 @@ elif menu == "🛠️ İş Emirleri":
             with st.container(border=True):
                 c1, c2, c3 = st.columns([0.54, 0.23, 0.23])
                 toplam_uret = cursor.execute("SELECT COALESCE(SUM(miktar), 0) FROM UretimKayitlari WHERE is_emri_id=?", (int(row['id']),)).fetchone()[0]
-                c1.write(f"**{row['kod']}** | Plan: {row['adet']} | Üretilen: {float(toplam_uret):.3f} | Lot: {row['lot_no']} | Tezgah: {row['tezgah_kod'] or '-'} | Operatör: {row['operator_ad'] or '-'}")
+                
+                # Dinamik Operatör Tespiti (Görünüm için)
+                now_dt = datetime.now()
+                v_id_now, _ = get_shift_id_and_name(now_dt)
+                display_op = row['operator_ad']
+                if (not display_op or display_op == "-") and row['tezgah_id']:
+                    assigned_now = get_operator_assignment_for_day(now_dt.date(), v_id_now, row['tezgah_id'])
+                    if assigned_now:
+                        op_id_now = assigned_now[0]
+                        op_name_now = cursor.execute("SELECT ad FROM Operatorler WHERE id=?", (op_id_now,)).fetchone()
+                        if op_name_now:
+                            display_op = f"🔄 {op_name_now[0]}" # Rotasyondan geldiğini belirtmek için ikon
+                
+                c1.write(f"**{row['kod']}** | Plan: {row['adet']} | Üretilen: {float(toplam_uret):.3f} | Lot: {row['lot_no']} | Tezgah: {row['tezgah_kod'] or '-'} | Operatör: {display_op or '-'}")
                 
                 with c2.popover("➕ Üretim Gir"):
                     p_miktar = st.number_input("Üretim Miktarı", min_value=0.001, value=1.0, step=0.1, format="%.3f", key=f"pm_{row['id']}")
                     p_tarih = st.date_input("Tarih", value=datetime.now().date(), key=f"pt_{row['id']}")
                     p_saat = st.time_input("Saat", value=datetime.now().time(), key=f"ps_{row['id']}")
                     
+                    # Eğer iş emrinde tezgah seçilmemişse burada seçtirelim
+                    current_tezgah_id = row['tezgah_id']
+                    if not current_tezgah_id:
+                        st.warning("⚠️ Bu iş emrine tezgah atanmamış. Lütfen tezgah seçin:")
+                        tz_secim = st.selectbox("Tezgah Seç", [""] + tezgah_ops, key=f"pop_tz_sec_{row['id']}")
+                        if tz_secim and tz_secim != "":
+                            current_tezgah_id = int(tz_secim.split("|")[0].strip())
+                    
                     # Otomatik Vardiya ve Operatör Tespiti
                     ts_now = datetime.combine(p_tarih, p_saat)
                     v_id, v_ad = get_shift_id_and_name(ts_now)
-                    assigned_op = get_operator_assignment_for_day(p_tarih, v_id, row['tezgah_id'])
+                    assigned_op = get_operator_assignment_for_day(p_tarih, v_id, current_tezgah_id)
                     assigned_op_id = assigned_op[0] if assigned_op else None
                     
-                    st.info(f"Vardiya: {v_ad}")
+                    # Atanan operatör adını bul
+                    assigned_op_name = "Tanımlı Değil"
+                    if assigned_op_id:
+                        for op_str in op_list_for_select:
+                            if op_str.startswith(f"{assigned_op_id} |"):
+                                assigned_op_name = op_str.split(" | ")[1]
+                                break
+                    
+                    st.success(f"📌 **Mevcut Vardiya:** {v_ad}  \n👤 **Atanan Operatör:** {assigned_op_name}")
                     
                     # Varsayılan operatörü seç
                     default_op_idx = 0
@@ -632,13 +661,17 @@ elif menu == "🛠️ İş Emirleri":
                                 default_op_idx = idx
                                 break
                     
-                    p_operator = st.selectbox("Operatör", op_list_for_select, index=default_op_idx, key=f"pop_{row['id']}") if op_list_for_select else None
+                    p_operator = st.selectbox("Operatör (Manuel Değiştirebilirsiniz)", op_list_for_select, index=default_op_idx, key=f"pop_{row['id']}") if op_list_for_select else None
                     if st.button("Kaydet", key=f"pk_{row['id']}"):
                         ts = datetime.combine(p_tarih, p_saat)
                         vardiya_id, _ = get_shift_id_and_name(ts)
                         op_id = int(p_operator.split("|")[0].strip()) if p_operator else None
                         try:
-                            cursor.execute("INSERT INTO UretimKayitlari (is_emri_id, mamul_id, tezgah_id, vardiya_id, operator_id, miktar, tarih) VALUES (?, (SELECT id FROM Stoklar WHERE kod=?), ?, ?, ?, ?, ?)", (int(row['id']), row['kod'], row['tezgah_id'], vardiya_id, op_id, float(p_miktar), ts.strftime("%Y-%m-%d %H:%M:%S")))
+                            # Eğer iş emrinde tezgah yoksa güncelle
+                            if not row['tezgah_id'] and current_tezgah_id:
+                                cursor.execute("UPDATE IsEmirleri SET tezgah_id=? WHERE id=?", (current_tezgah_id, int(row['id'])))
+                            
+                            cursor.execute("INSERT INTO UretimKayitlari (is_emri_id, mamul_id, tezgah_id, vardiya_id, operator_id, miktar, tarih) VALUES (?, (SELECT id FROM Stoklar WHERE kod=?), ?, ?, ?, ?, ?)", (int(row['id']), row['kod'], current_tezgah_id, vardiya_id, op_id, float(p_miktar), ts.strftime("%Y-%m-%d %H:%M:%S")))
                             cursor.execute("UPDATE Stoklar SET miktar = miktar + ? WHERE kod=?", (float(p_miktar), row['kod']))
                             cursor.execute("INSERT INTO LotStok (stok_id, lot_no, miktar) VALUES ((SELECT id FROM Stoklar WHERE kod=?),?,?) ON CONFLICT(stok_id, lot_no) DO UPDATE SET miktar = miktar + excluded.miktar", (row['kod'], row['lot_no'], float(p_miktar)))
                             cursor.execute("INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih) VALUES ((SELECT id FROM Stoklar WHERE kod=?),?,'URETIM',?,?)", (row['kod'], float(p_miktar), row['lot_no'], ts.strftime("%Y-%m-%d %H:%M:%S")))
@@ -1014,9 +1047,22 @@ elif menu == "🛠️ İş Emirleri":
 elif menu == "🏭 Proses Takip":
     st.header("🏭 Lot Bazlı Proses Takip")
     asama_turkce = {"KALITE": "🔬 Kalite", "BUKUM": "🔄 Büküm", "ISIL_ISLEM": "🔥 Isıl İşlem", "KAPLAMA": "🎨 Kaplama", "SEVK": "🚚 Sevk"}
+    # Filtreleme
+    st.markdown("#### 🔍 Filtrele")
+    col_f1, col_f2 = st.columns(2)
+    f_kod = col_f1.text_input("Ürün Kodu Ara", value="", key="pt_filtre_kod").strip().upper()
+    f_asama = col_f2.selectbox("Aşama Filtresi", ["TÜMÜ", "KALITE", "BUKUM", "ISIL_ISLEM", "KAPLAMA", "SEVK"], key="pt_filtre_asama")
+    
     df_lotlar = get_available_lots_for_process()
+    
+    if not df_lotlar.empty:
+        if f_kod:
+            df_lotlar = df_lotlar[df_lotlar['stok_kodu'].str.contains(f_kod, na=False)]
+        if f_asama != "TÜMÜ":
+            df_lotlar = df_lotlar[df_lotlar['mevcut_asama'] == f_asama]
+
     if df_lotlar.empty:
-        st.info("📭 Proses takibi için lot bulunmuyor.")
+        st.info("📭 Seçili kriterlere uygun lot bulunmuyor.")
     else:
         for _, row in df_lotlar.iterrows():
             with st.container(border=True):
@@ -1046,10 +1092,14 @@ elif menu == "🚀 Verimlilik & Analiz":
     
     with v_t1:
         st.subheader("📉 Günlük Tezgah Performansı")
-        v_tarih = st.date_input("Analiz Tarihi", value=datetime.now().date())
+        c_v1, c_v2 = st.columns(2)
+        v_tarih = c_v1.date_input("Analiz Tarihi", value=datetime.now().date())
+        
+        tezgah_list = pd.read_sql_query("SELECT id, kod FROM Tezgahlar ORDER BY kod", conn)
+        secili_tezgahlar = c_v2.multiselect("Tezgah Filtresi", options=tezgah_list['kod'].tolist(), default=tezgah_list['kod'].tolist())
         
         # Üretim verilerini getir
-        prod_data = pd.read_sql_query("""
+        sql_verim = """
             SELECT T.kod as tezgah, S.kod as urun, SUM(U.miktar) as uretilen,
                    V.saniye_adet, T.id as tid, S.id as sid
             FROM UretimKayitlari U
@@ -1057,8 +1107,14 @@ elif menu == "🚀 Verimlilik & Analiz":
             JOIN Stoklar S ON S.id = U.mamul_id
             LEFT JOIN UrunTezgahVerim V ON V.stok_id = S.id AND V.tezgah_id = T.id
             WHERE DATE(U.tarih) = ?
-            GROUP BY T.kod, S.kod
-        """, conn, params=(v_tarih.strftime("%Y-%m-%d"),))
+        """
+        params_verim = [v_tarih.strftime("%Y-%m-%d")]
+        if secili_tezgahlar:
+            sql_verim += f" AND T.kod IN ({','.join(['?']*len(secili_tezgahlar))})"
+            params_verim.extend(secili_tezgahlar)
+        
+        sql_verim += " GROUP BY T.kod, S.kod"
+        prod_data = pd.read_sql_query(sql_verim, conn, params=params_verim)
         
         if prod_data.empty:
             st.info("Seçili tarihte üretim kaydı bulunamadı.")
@@ -1101,37 +1157,77 @@ elif menu == "🚀 Verimlilik & Analiz":
     with v_t3:
         st.subheader("📈 Stok Hareket Özeti (Son 30 Gün)")
         
-        # Verileri Topla
-        giris_sum = cursor.execute("SELECT SUM(hareket_miktari) FROM Hareketler WHERE tip='GIRIS' AND DATE(tarih) >= DATE('now', '-30 days')").fetchone()[0] or 0
-        sevk_sum = cursor.execute("SELECT SUM(hareket_miktari) FROM Hareketler WHERE tip='SEVK' AND DATE(tarih) >= DATE('now', '-30 days')").fetchone()[0] or 0
-        uretim_sum = cursor.execute("SELECT SUM(miktar) FROM UretimKayitlari WHERE DATE(tarih) >= DATE('now', '-30 days')").fetchone()[0] or 0
+        # Hammadde Analizi
+        st.markdown("#### 🪵 Hammadde Hareketleri (Giriş & Sarf)")
+        h_data = pd.read_sql_query("""
+            SELECT H.tip, SUM(H.hareket_miktari) as miktar
+            FROM Hareketler H
+            JOIN Stoklar S ON S.id = H.stok_id
+            WHERE S.tip = 'HAM' AND H.tip IN ('GIRIS', 'SARF')
+              AND DATE(H.tarih) >= DATE('now', '-30 days')
+            GROUP BY H.tip
+        """, conn)
         
-        c1, c2, c3 = st.columns(3)
-        c1.metric("📥 Toplam Giriş", f"{giris_sum:.2f}")
-        c2.metric("🏗️ Toplam Üretim", f"{uretim_sum:.2f}")
-        c3.metric("🚚 Toplam Sevk", f"{sevk_sum:.2f}")
+        col_h1, col_h2 = st.columns([1, 1])
+        with col_h1:
+            if not h_data.empty:
+                h_pie = alt.Chart(h_data).mark_arc(innerRadius=50).encode(
+                    theta=alt.Theta(field="miktar", type="quantitative"),
+                    color=alt.Color(field="tip", type="nominal", scale=alt.Scale(range=['#4facfe', '#ff4b2b'])),
+                    tooltip=["tip", "miktar"]
+                ).properties(title="Hammadde Dağılımı")
+                st.altair_chart(h_pie, use_container_width=True)
+            else:
+                st.info("Hammadde hareketi bulunamadı.")
+        with col_h2:
+            for _, r in h_data.iterrows():
+                st.metric(f"Hammadde {r['tip']}", f"{r['miktar']:.2f}")
+
+        st.divider()
+
+        # Mamul Analizi
+        st.markdown("#### 🏗️ Mamul Hareketleri (Giriş, Üretim & Sevk)")
+        m_data_move = pd.read_sql_query("""
+            SELECT H.tip, SUM(H.hareket_miktari) as miktar
+            FROM Hareketler H
+            JOIN Stoklar S ON S.id = H.stok_id
+            WHERE S.tip = 'MAM' AND H.tip IN ('GIRIS', 'SEVK')
+              AND DATE(H.tarih) >= DATE('now', '-30 days')
+            GROUP BY H.tip
+        """, conn)
         
+        m_uretim = cursor.execute("""
+            SELECT SUM(miktar) FROM UretimKayitlari 
+            WHERE DATE(tarih) >= DATE('now', '-30 days')
+        """).fetchone()[0] or 0
+        
+        # Verileri birleştir
+        m_list = []
+        if not m_data_move.empty:
+            for _, r in m_data_move.iterrows():
+                m_list.append({"Kategori": f"Mamul {r['tip']}", "Miktar": float(r['miktar'])})
+        m_list.append({"Kategori": "Mamul ÜRETİM", "Miktar": float(m_uretim)})
+        m_df = pd.DataFrame(m_list)
+
+        col_m1, col_m2 = st.columns([1, 1])
+        with col_m1:
+            if m_df['Miktar'].sum() > 0:
+                m_pie = alt.Chart(m_df).mark_arc(innerRadius=50).encode(
+                    theta=alt.Theta(field="Miktar", type="quantitative"),
+                    color=alt.Color(field="Kategori", type="nominal", scale=alt.Scale(range=['#00f2fe', '#f093fb', '#48c6ef'])),
+                    tooltip=["Kategori", "Miktar"]
+                ).properties(title="Mamul Dağılımı")
+                st.altair_chart(m_pie, use_container_width=True)
+            else:
+                st.info("Mamul hareketi bulunamadı.")
+        with col_m2:
+            for _, r in m_df.iterrows():
+                st.metric(r['Kategori'], f"{r['Miktar']:.2f}")
+
         st.divider()
         
-        # Pasta (Donut) Grafik
-        pie_data = pd.DataFrame({
-            "Kategori": ["Giriş (Satın Alma)", "Üretim (Mamul)", "Sevk (Satış)"],
-            "Miktar": [float(giris_sum), float(uretim_sum), float(sevk_sum)]
-        })
-        
-        if pie_data['Miktar'].sum() > 0:
-            import altair as alt
-            donut = alt.Chart(pie_data).mark_arc(innerRadius=60).encode(
-                theta=alt.Theta(field="Miktar", type="quantitative"),
-                color=alt.Color(field="Kategori", type="nominal", scale=alt.Scale(range=['#4facfe', '#00f2fe', '#f093fb'])),
-                tooltip=["Kategori", "Miktar"]
-            ).properties(height=400)
-            st.altair_chart(donut, use_container_width=True)
-        else:
-            st.info("Grafik oluşturmak için henüz yeterli hareket verisi yok.")
-        
         # Günlük hareket trendi
-        # Günlük hareket trendi
+        st.markdown("#### 📅 Günlük Trend (Son 30 Gün)")
         trend_df = pd.read_sql_query("""
             SELECT DATE(tarih) as gun, tip, SUM(hareket_miktari) as miktar
             FROM Hareketler
@@ -1146,7 +1242,6 @@ elif menu == "🚀 Verimlilik & Analiz":
         """, conn)
         
         if not trend_df.empty:
-            st.markdown("#### Günlük Trend (Son 30 Gün)")
             pivot_trend = trend_df.pivot_table(index='gun', columns='tip', values='miktar', aggfunc='sum').fillna(0)
             st.line_chart(pivot_trend)
 
