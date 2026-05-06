@@ -1443,50 +1443,53 @@ elif menu == "⚙️ Ayarlar & Yedek":
         st.write("Verimlilik hesaplamaları için ürünlerin tezgahlardaki adet başı çevrim süresini (saniye) girin.")
         
         # Excel Yükleme Bölümü
-        with st.expander("📥 Excel'den Toplu Yükle"):
-            st.write("Excel dosyanızda şu sütunlar olmalıdır: **Urun_Kodu**, **Tezgah_Kodu**, **Saniye_Adet**")
+        with st.expander("📥 Excel'den Matris Formatında Yükle"):
+            st.write("Bu bölümde ürünlerin satırlarda, tezgahların sütunlarda olduğu matris formatındaki Excel dosyalarını yükleyebilirsiniz.")
+            st.info("💡 İlk sütun **Ürün Kodları**, diğer sütun başlıkları ise **Tezgah Kodları** olmalıdır.")
             
-            # Örnek Excel Şablonu Oluştur
-            template_df = pd.DataFrame(columns=["Urun_Kodu", "Tezgah_Kodu", "Saniye_Adet"])
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                template_df.to_excel(writer, index=False, sheet_name='Sablon')
-            st.download_button(label="📄 Örnek Şablonu İndir", data=output.getvalue(), file_name="cevrim_sureleri_sablon.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            
-            uploaded_file = st.file_uploader("Excel Dosyası Seç", type=["xlsx", "xls"])
+            uploaded_file = st.file_uploader("Excel Dosyası Seç (Matris Formatı)", type=["xlsx", "xls"])
             if uploaded_file:
                 try:
                     df_upload = pd.read_excel(uploaded_file)
-                    required_cols = ["Urun_Kodu", "Tezgah_Kodu", "Saniye_Adet"]
-                    if all(col in df_upload.columns for col in required_cols):
-                        if st.button("🚀 Verileri Veritabanına İşle"):
+                    if not df_upload.empty:
+                        st.write("📊 Yüklenen Dosya Önizleme (İlk 5 Satır):")
+                        st.dataframe(df_upload.head(), use_container_width=True)
+                        
+                        if st.button("🚀 Matris Verilerini İşle"):
                             success_count = 0
                             error_count = 0
+                            urun_col = df_upload.columns[0]
+                            tezgah_cols = df_upload.columns[1:]
+                            
                             for _, row in df_upload.iterrows():
-                                u_kod = str(row['Urun_Kodu']).strip()
-                                t_kod = str(row['Tezgah_Kodu']).strip()
-                                try:
-                                    saniye = float(row['Saniye_Adet'])
-                                except:
-                                    error_count += 1
+                                u_kod = str(row[urun_col]).strip()
+                                # Ürün ID bul
+                                sid_row = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (u_kod,)).fetchone()
+                                if not sid_row:
+                                    error_count += len(tezgah_cols)
                                     continue
                                 
-                                # ID'leri bul
-                                sid_row = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (u_kod,)).fetchone()
-                                tid_row = cursor.execute("SELECT id FROM Tezgahlar WHERE kod=?", (t_kod,)).fetchone()
-                                
-                                if sid_row and tid_row:
-                                    cursor.execute("INSERT OR REPLACE INTO UrunTezgahVerim (stok_id, tezgah_id, saniye_adet) VALUES (?,?,?)", (sid_row[0], tid_row[0], saniye))
-                                    success_count += 1
-                                else:
-                                    error_count += 1
+                                sid = sid_row[0]
+                                for t_kod in tezgah_cols:
+                                    val = row[t_kod]
+                                    if pd.notna(val):
+                                        try:
+                                            saniye = float(val)
+                                            # Tezgah ID bul
+                                            tid_row = cursor.execute("SELECT id FROM Tezgahlar WHERE kod=?", (str(t_kod).strip(),)).fetchone()
+                                            if tid_row:
+                                                cursor.execute("INSERT OR REPLACE INTO UrunTezgahVerim (stok_id, tezgah_id, saniye_adet) VALUES (?,?,?)", (sid, tid_row[0], saniye))
+                                                success_count += 1
+                                            else:
+                                                error_count += 1
+                                        except:
+                                            error_count += 1
+                            
                             conn.commit()
-                            st.success(f"✅ İşlem tamamlandı! {success_count} kayıt eklendi/güncellendi. {error_count} hatalı veya eşleşmeyen kayıt atlandı.")
+                            st.success(f"✅ İşlem tamamlandı! {success_count} çevrim süresi kaydedildi. {error_count} geçersiz veri veya eşleşmeyen kod atlandı.")
                             st.rerun()
-                    else:
-                        st.error("Excel sütun başlıkları hatalı! Lütfen şablonu kullanın.")
                 except Exception as e:
-                    st.error(f"Dosya okuma hatası: {e}")
+                    st.error(f"Hata: {e}")
 
         st.divider()
         
