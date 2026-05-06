@@ -1442,6 +1442,54 @@ elif menu == "⚙️ Ayarlar & Yedek":
         st.subheader("⏱️ Ürün & Tezgah Çevrim Süreleri")
         st.write("Verimlilik hesaplamaları için ürünlerin tezgahlardaki adet başı çevrim süresini (saniye) girin.")
         
+        # Excel Yükleme Bölümü
+        with st.expander("📥 Excel'den Toplu Yükle"):
+            st.write("Excel dosyanızda şu sütunlar olmalıdır: **Urun_Kodu**, **Tezgah_Kodu**, **Saniye_Adet**")
+            
+            # Örnek Excel Şablonu Oluştur
+            template_df = pd.DataFrame(columns=["Urun_Kodu", "Tezgah_Kodu", "Saniye_Adet"])
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                template_df.to_excel(writer, index=False, sheet_name='Sablon')
+            st.download_button(label="📄 Örnek Şablonu İndir", data=output.getvalue(), file_name="cevrim_sureleri_sablon.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            
+            uploaded_file = st.file_uploader("Excel Dosyası Seç", type=["xlsx", "xls"])
+            if uploaded_file:
+                try:
+                    df_upload = pd.read_excel(uploaded_file)
+                    required_cols = ["Urun_Kodu", "Tezgah_Kodu", "Saniye_Adet"]
+                    if all(col in df_upload.columns for col in required_cols):
+                        if st.button("🚀 Verileri Veritabanına İşle"):
+                            success_count = 0
+                            error_count = 0
+                            for _, row in df_upload.iterrows():
+                                u_kod = str(row['Urun_Kodu']).strip()
+                                t_kod = str(row['Tezgah_Kodu']).strip()
+                                try:
+                                    saniye = float(row['Saniye_Adet'])
+                                except:
+                                    error_count += 1
+                                    continue
+                                
+                                # ID'leri bul
+                                sid_row = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (u_kod,)).fetchone()
+                                tid_row = cursor.execute("SELECT id FROM Tezgahlar WHERE kod=?", (t_kod,)).fetchone()
+                                
+                                if sid_row and tid_row:
+                                    cursor.execute("INSERT OR REPLACE INTO UrunTezgahVerim (stok_id, tezgah_id, saniye_adet) VALUES (?,?,?)", (sid_row[0], tid_row[0], saniye))
+                                    success_count += 1
+                                else:
+                                    error_count += 1
+                            conn.commit()
+                            st.success(f"✅ İşlem tamamlandı! {success_count} kayıt eklendi/güncellendi. {error_count} hatalı veya eşleşmeyen kayıt atlandı.")
+                            st.rerun()
+                    else:
+                        st.error("Excel sütun başlıkları hatalı! Lütfen şablonu kullanın.")
+                except Exception as e:
+                    st.error(f"Dosya okuma hatası: {e}")
+
+        st.divider()
+        
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("#### ➕ Yeni Çevrim Süresi")
