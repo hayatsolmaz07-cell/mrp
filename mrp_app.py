@@ -20,73 +20,49 @@ def generate_lot(prefix):
     return f"{prefix}-{datetime.now().strftime('%d%m%H%M%S')}"
 
 def get_available_lots_for_process(stok_kodu=None, mevcut_asama=None):
-    # Tüm aktif lotları ve toplam miktarlarını getir
-    query_stok = """
-        SELECT 
-            S.id as stok_id, S.kod as stok_kodu, S.ad as stok_adi, L.lot_no, L.miktar as total_miktar,
-            GROUP_CONCAT(DISTINCT O.ad) as operatorler,
-            GROUP_CONCAT(DISTINCT V.ad) as vardiyalar
-        FROM LotStok L
+    # Tüm aşama takibi kayıtlarını getir (Vardiya, Tarih ve Operatör dahil)
+    query_stages = """
+        SELECT L.id, L.stok_id, S.kod as stok_kodu, S.ad as stok_adi, L.lot_no, L.asama, L.miktar, 
+               L.son_guncelleme, L.vardiya_id, L.uretim_tarihi, L.operator_id, 
+               V.ad as vardiya_ad, O.ad as operator_ad
+        FROM LotAsamaTakip L
         JOIN Stoklar S ON S.id = L.stok_id
-        LEFT JOIN IsEmirleri I ON I.lot_no = L.lot_no AND I.mamul_id = L.stok_id
-        LEFT JOIN UretimKayitlari U ON U.is_emri_id = I.id
-        LEFT JOIN Operatorler O ON O.id = U.operator_id
-        LEFT JOIN Vardiyalar V ON V.id = U.vardiya_id
-        WHERE L.miktar > 0 AND UPPER(COALESCE(S.tip, '')) NOT IN ('HAM', 'HAMMADDE')
+        LEFT JOIN Vardiyalar V ON V.id = L.vardiya_id
+        LEFT JOIN Operatorler O ON O.id = L.operator_id
+        WHERE L.miktar > 0
     """
     params = []
     if stok_kodu:
-        query_stok += " AND UPPER(S.kod) LIKE ?"
+        query_stages += " AND UPPER(S.kod) LIKE ?"
         params.append(f"%{stok_kodu.upper()}%")
     
-    query_stok += " GROUP BY L.lot_no, S.id"
-    
-    df_lots = pd.read_sql_query(query_stok, conn, params=params)
-    
-    # Tüm aşama takibi kayıtlarını getir
-    df_stages = pd.read_sql_query("SELECT stok_id, lot_no, asama, miktar, son_guncelleme FROM LotAsamaTakip", conn)
+    df_stages = pd.read_sql_query(query_stages, conn, params=params)
     
     results = []
-    for _, lot in df_lots.iterrows():
-        # Bu lot için veritabanında kayıtlı aşamaları bul
-        lot_stages = df_stages[(df_stages['stok_id'] == lot['stok_id']) & (df_stages['lot_no'] == lot['lot_no'])]
-        
-        tracked_qty = lot_stages['miktar'].sum() if not lot_stages.empty else 0
-        untracked_qty = lot['total_miktar'] - tracked_qty
-        
-        # Üretim bilgisi (Operatör ve Vardiya)
+    for _, stage in df_stages.iterrows():
+        # Üretim bilgisi (Vardiya, Tarih ve Operatör bilgisini öne çıkaralım)
         prod_info = ""
-        if lot['operatorler']:
-            prod_info += f" 👤 {lot['operatorler']}"
-        if lot['vardiyalar']:
-            prod_info += f" 🕒 {lot['vardiyalar']}"
-
-        # Takip edilen aşamaları ekle
-        for _, stage in lot_stages.iterrows():
-            if stage['miktar'] > 0:
-                results.append({
-                    'stok_id': lot['stok_id'],
-                    'stok_kodu': lot['stok_kodu'],
-                    'stok_adi': lot['stok_adi'],
-                    'lot_no': lot['lot_no'],
-                    'miktar': stage['miktar'],
-                    'mevcut_asama': stage['asama'],
-                    'son_guncelleme': stage['son_guncelleme'],
-                    'uretim_bilgi': prod_info
-                })
-        
-        # Takip edilmeyen (henüz aşama kaydı açılmamış) miktarı KALITE olarak ekle
-        if untracked_qty > 0.001:
-            results.append({
-                'stok_id': lot['stok_id'],
-                'stok_kodu': lot['stok_kodu'],
-                'stok_adi': lot['stok_adi'],
-                'lot_no': lot['lot_no'],
-                'miktar': untracked_qty,
-                'mevcut_asama': 'KALITE',
-                'son_guncelleme': '-',
-                'uretim_bilgi': prod_info
-            })
+        if stage['uretim_tarihi']:
+            prod_info += f" 📅 {stage['uretim_tarihi']}"
+        if stage['vardiya_ad']:
+            prod_info += f" 🕒 {stage['vardiya_ad']}"
+        if stage['operator_ad']:
+            prod_info += f" 👤 {stage['operator_ad']}"
+            
+        results.append({
+            'id': stage['id'],
+            'stok_id': stage['stok_id'],
+            'stok_kodu': stage['stok_kodu'],
+            'stok_adi': stage['stok_adi'],
+            'lot_no': stage['lot_no'],
+            'miktar': stage['miktar'],
+            'mevcut_asama': stage['asama'],
+            'son_guncelleme': stage['son_guncelleme'],
+            'uretim_bilgi': prod_info,
+            'vardiya_id': stage['vardiya_id'],
+            'uretim_tarihi': stage['uretim_tarihi'],
+            'operator_id': stage['operator_id']
+        })
             
     if not results:
         return pd.DataFrame(columns=['stok_id', 'stok_kodu', 'stok_adi', 'lot_no', 'miktar', 'mevcut_asama', 'son_guncelleme', 'uretim_bilgi'])
@@ -95,37 +71,58 @@ def get_available_lots_for_process(stok_kodu=None, mevcut_asama=None):
     if mevcut_asama:
         df_final = df_final[df_final['mevcut_asama'] == mevcut_asama]
         
-    return df_final.sort_values(['stok_kodu', 'lot_no'])
+    return df_final.sort_values(['stok_kodu', 'uretim_tarihi', 'vardiya_id', 'lot_no'], ascending=[True, False, False, True])
 
 
-def update_lot_asama_partial(stok_id, lot_no, current_asama, target_asama, amount):
+def update_lot_asama_partial(stok_id, lot_no, current_asama, target_asama, amount, vardiya_id=None, u_tarih=None, op_id=None, row_id=None):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # 1. Mevcut aşamadan düşür
-    current_entry = cursor.execute("SELECT miktar FROM LotAsamaTakip WHERE stok_id=? AND lot_no=? AND asama=?", (stok_id, lot_no, current_asama)).fetchone()
+    # 1. Mevcut aşamadan düşür (Eğer ID varsa doğrudan ID ile, yoksa kriterlerle)
+    if row_id:
+        current_entry = cursor.execute("SELECT id, miktar FROM LotAsamaTakip WHERE id=?", (row_id,)).fetchone()
+    else:
+        sql_find = "SELECT id, miktar FROM LotAsamaTakip WHERE stok_id=? AND lot_no=? AND asama=?"
+        params_find = [stok_id, lot_no, current_asama]
+        if vardiya_id and not pd.isna(vardiya_id):
+            sql_find += " AND vardiya_id=?"; params_find.append(vardiya_id)
+        if u_tarih and not pd.isna(u_tarih):
+            sql_find += " AND uretim_tarihi=?"; params_find.append(u_tarih)
+        if op_id and not pd.isna(op_id):
+            sql_find += " AND operator_id=?"; params_find.append(op_id)
+        current_entry = cursor.execute(sql_find, params_find).fetchone()
     
     if current_entry:
-        new_current_qty = max(float(current_entry[0]) - float(amount), 0.0)
+        r_id = current_entry[0]
+        new_current_qty = max(float(current_entry[1]) - float(amount), 0.0)
         if new_current_qty > 0.001:
-            cursor.execute("UPDATE LotAsamaTakip SET miktar=?, son_guncelleme=? WHERE stok_id=? AND lot_no=? AND asama=?", (new_current_qty, now_str, stok_id, lot_no, current_asama))
+            cursor.execute("UPDATE LotAsamaTakip SET miktar=?, son_guncelleme=? WHERE id=?", (new_current_qty, now_str, r_id))
         else:
-            cursor.execute("DELETE FROM LotAsamaTakip WHERE stok_id=? AND lot_no=? AND asama=?", (stok_id, lot_no, current_asama))
-    else:
-        # Untracked KALITE
-        total_lot_qty = cursor.execute("SELECT miktar FROM LotStok WHERE stok_id=? AND lot_no=?", (stok_id, lot_no)).fetchone()[0]
-        tracked_sum = cursor.execute("SELECT SUM(miktar) FROM LotAsamaTakip WHERE stok_id=? AND lot_no=?", (stok_id, lot_no)).fetchone()[0] or 0
-        untracked_qty = float(total_lot_qty) - float(tracked_sum)
-        
-        new_current_qty = max(untracked_qty - float(amount), 0.0)
-        if new_current_qty > 0.001:
-            cursor.execute("INSERT INTO LotAsamaTakip (stok_id, lot_no, asama, miktar, son_guncelleme) VALUES (?,?,?,?,?)", (stok_id, lot_no, current_asama, new_current_qty, now_str))
+            cursor.execute("DELETE FROM LotAsamaTakip WHERE id=?", (r_id,))
             
-    # 2. Hedef aşamaya ekle
-    target_entry = cursor.execute("SELECT miktar FROM LotAsamaTakip WHERE stok_id=? AND lot_no=? AND asama=?", (stok_id, lot_no, target_asama)).fetchone()
+    # 2. Hedef aşamaya ekle (Batch ve Operatör bilgisini koruyarak)
+    # Hedefte aynı kriterlere sahip kayıt varsa üzerine ekle, yoksa yeni oluştur
+    sql_check = "SELECT id FROM LotAsamaTakip WHERE stok_id=? AND lot_no=? AND asama=?"
+    params_check = [stok_id, lot_no, target_asama]
+    
+    # Kriterleri güvenli ekle
+    v_id = vardiya_id if not pd.isna(vardiya_id) else None
+    u_dt = u_tarih if not pd.isna(u_tarih) else None
+    o_id = op_id if not pd.isna(op_id) else None
+    
+    if v_id: sql_check += " AND vardiya_id=?"; params_check.append(v_id)
+    else: sql_check += " AND vardiya_id IS NULL"
+    
+    if u_dt: sql_check += " AND uretim_tarihi=?"; params_check.append(u_dt)
+    else: sql_check += " AND uretim_tarihi IS NULL"
+    
+    if o_id: sql_check += " AND operator_id=?"; params_check.append(o_id)
+    else: sql_check += " AND operator_id IS NULL"
+        
+    target_entry = cursor.execute(sql_check, params_check).fetchone()
     if target_entry:
-        cursor.execute("UPDATE LotAsamaTakip SET miktar=miktar+?, son_guncelleme=? WHERE stok_id=? AND lot_no=? AND asama=?", (float(amount), now_str, stok_id, lot_no, target_asama))
+        cursor.execute("UPDATE LotAsamaTakip SET miktar=miktar+?, son_guncelleme=? WHERE id=?", (float(amount), now_str, target_entry[0]))
     else:
-        cursor.execute("INSERT INTO LotAsamaTakip (stok_id, lot_no, asama, miktar, son_guncelleme) VALUES (?,?,?,?,?)", (stok_id, lot_no, target_asama, float(amount), now_str))
+        cursor.execute("INSERT INTO LotAsamaTakip (stok_id, lot_no, asama, miktar, son_guncelleme, vardiya_id, uretim_tarihi, operator_id) VALUES (?,?,?,?,?,?,?,?)", (stok_id, lot_no, target_asama, float(amount), now_str, v_id, u_dt, o_id))
     
     # 3. Geçmişe kaydet
     cursor.execute("INSERT INTO LotAsamaGecmis (stok_id, lot_no, asama, tarih, aciklama) VALUES (?,?,?,?,?)", (stok_id, lot_no, target_asama, now_str, f"{amount} adet: {current_asama} → {target_asama}"))
@@ -219,26 +216,44 @@ def init_db():
         lot_no TEXT, tarih TEXT, firma_adi TEXT, irsaliye_no TEXT)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS LotStok (
         id INTEGER PRIMARY KEY, stok_id INTEGER, lot_no TEXT, miktar REAL DEFAULT 0, UNIQUE(stok_id, lot_no))''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS LotAsamaTakip (
-        id INTEGER PRIMARY KEY, stok_id INTEGER, lot_no TEXT, asama TEXT, miktar REAL, son_guncelleme TEXT, UNIQUE(stok_id, lot_no, asama))''')
-    # LotAsamaTakip Göçü (Migrasyon)
+    # LotAsamaTakip Göçü (UNIQUE constraint kontrolü)
+    asama_info = cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='LotAsamaTakip'").fetchone()
+    asama_sql = asama_info[0] if asama_info else ""
     asama_kolonlar = [c[1] for c in cursor.execute("PRAGMA table_info(LotAsamaTakip)").fetchall()]
-    if "miktar" not in asama_kolonlar:
+    
+    # Eğer UNIQUE kısıtlaması varsa veya yeni kolonlar eksikse tabloyu yeniden oluştur
+    if "UNIQUE" in asama_sql.upper() or "operator_id" not in asama_kolonlar:
         try:
             cursor.execute("ALTER TABLE LotAsamaTakip RENAME TO LotAsamaTakip_old")
             cursor.execute('''CREATE TABLE LotAsamaTakip (
-                id INTEGER PRIMARY KEY, stok_id INTEGER, lot_no TEXT, asama TEXT, miktar REAL, son_guncelleme TEXT, 
-                UNIQUE(stok_id, lot_no, asama))''')
-            cursor.execute("""
-                INSERT INTO LotAsamaTakip (stok_id, lot_no, asama, miktar, son_guncelleme)
-                SELECT T.stok_id, T.lot_no, T.asama, COALESCE(L.miktar, 0), T.son_guncelleme
-                FROM LotAsamaTakip_old T
-                LEFT JOIN LotStok L ON T.stok_id = L.stok_id AND T.lot_no = L.lot_no
-            """)
+                id INTEGER PRIMARY KEY, stok_id INTEGER, lot_no TEXT, asama TEXT, miktar REAL, son_guncelleme TEXT,
+                vardiya_id INTEGER, uretim_tarihi TEXT, operator_id INTEGER)''')
+            
+            # Eski kolonları dinamik olarak belirle ve verileri aktar
+            mig_cols = [c for c in ["stok_id", "lot_no", "asama", "miktar", "son_guncelleme", "vardiya_id", "uretim_tarihi", "operator_id"] if c in asama_kolonlar]
+            col_list = ", ".join(mig_cols)
+            cursor.execute(f"INSERT INTO LotAsamaTakip ({col_list}) SELECT {col_list} FROM LotAsamaTakip_old")
+            
             cursor.execute("DROP TABLE LotAsamaTakip_old")
-        except:
-            pass
-
+            conn.commit()
+        except Exception as e:
+            # Tablo yoksa veya hata oluşursa normal oluştur
+            cursor.execute('''CREATE TABLE IF NOT EXISTS LotAsamaTakip (
+                id INTEGER PRIMARY KEY, stok_id INTEGER, lot_no TEXT, asama TEXT, miktar REAL, son_guncelleme TEXT,
+                vardiya_id INTEGER, uretim_tarihi TEXT, operator_id INTEGER)''')
+    
+    # Stoklar tablosunu LotAsamaTakip ile senkronize et (Eski verilerdeki uyumsuzlukları gider)
+    cursor.execute("""
+        UPDATE Stoklar 
+        SET miktar = (
+            SELECT COALESCE(SUM(miktar), 0) 
+            FROM LotAsamaTakip 
+            WHERE LotAsamaTakip.stok_id = Stoklar.id
+        )
+        WHERE EXISTS (SELECT 1 FROM LotAsamaTakip WHERE LotAsamaTakip.stok_id = Stoklar.id)
+    """)
+    conn.commit()
+    
     cursor.execute('''CREATE TABLE IF NOT EXISTS LotAsamaGecmis (
         id INTEGER PRIMARY KEY, stok_id INTEGER, lot_no TEXT, asama TEXT, tarih TEXT, aciklama TEXT)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS Operatorler (id INTEGER PRIMARY KEY, ad TEXT UNIQUE NOT NULL)''')
@@ -675,6 +690,12 @@ elif menu == "🛠️ İş Emirleri":
                             cursor.execute("UPDATE Stoklar SET miktar = miktar + ? WHERE kod=?", (float(p_miktar), row['kod']))
                             cursor.execute("INSERT INTO LotStok (stok_id, lot_no, miktar) VALUES ((SELECT id FROM Stoklar WHERE kod=?),?,?) ON CONFLICT(stok_id, lot_no) DO UPDATE SET miktar = miktar + excluded.miktar", (row['kod'], row['lot_no'], float(p_miktar)))
                             cursor.execute("INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih) VALUES ((SELECT id FROM Stoklar WHERE kod=?),?,'URETIM',?,?)", (row['kod'], float(p_miktar), row['lot_no'], ts.strftime("%Y-%m-%d %H:%M:%S")))
+                            
+                            # LotAsamaTakip'e KALITE olarak ekle (Vardiya, Tarih ve Operatör bazlı ayrıştırma için)
+                            cursor.execute("""
+                                INSERT INTO LotAsamaTakip (stok_id, lot_no, asama, miktar, son_guncelleme, vardiya_id, uretim_tarihi, operator_id)
+                                VALUES ((SELECT id FROM Stoklar WHERE kod=?), ?, 'KALITE', ?, ?, ?, ?, ?)
+                            """, (row['kod'], row['lot_no'], float(p_miktar), ts.strftime("%Y-%m-%d %H:%M:%S"), vardiya_id, ts.strftime("%Y-%m-%d"), op_id))
                             conn.commit()
                             st.success("Üretim kaydı eklendi.")
                             st.rerun()
@@ -1074,13 +1095,17 @@ elif menu == "🏭 Proses Takip":
                         st.caption(f"Üretim Bilgisi: {row['uretim_bilgi']}")
                 with col2:
                     p_asama_sirasi = ["KALITE","BUKUM","ISIL_ISLEM","KAPLAMA","SEVK"]
-                    p_mevcut_idx = p_asama_sirasi.index(row['mevcut_asama']) if row['mevcut_asama'] in p_asama_sirasi else 0
-                    if p_mevcut_idx+1 < len(p_asama_sirasi):
-                        p_yeni_asama = p_asama_sirasi[p_mevcut_idx+1]
-                        move_qty = st.number_input("Adet", min_value=0.001, max_value=float(row['miktar']), value=float(row['miktar']), key=f"qty_{row['lot_no']}_{row['mevcut_asama']}")
-                        if st.button(f"➡️ İlerle", key=f"btn_{row['lot_no']}_{row['mevcut_asama']}"):
-                            update_lot_asama_partial(row['stok_id'], row['lot_no'], row['mevcut_asama'], p_yeni_asama, move_qty)
-                            st.success(f"{move_qty} adet {p_yeni_asama} aşamasına taşındı.")
+                    if row['mevcut_asama'] == "SEVK":
+                        st.info("📦 Ürün sevk aşamasında. Sevkiyat modülünden işlem yapın.")
+                    else:
+                        # Bir sonraki aşama seçimi (Manuel)
+                        p_diger_asamalar = [a for a in p_asama_sirasi if a != row['mevcut_asama']]
+                        p_yeni_asama = st.selectbox("Sonraki Aşama", p_diger_asamalar, key=f"next_{row['id']}")
+                        
+                        move_qty = st.number_input("Adet", min_value=0.001, max_value=float(row['miktar']), value=float(row['miktar']), key=f"qty_{row['id']}")
+                        if st.button(f"➡️ İlerle", key=f"btn_{row['id']}"):
+                            update_lot_asama_partial(row['stok_id'], row['lot_no'], row['mevcut_asama'], p_yeni_asama, move_qty, row['vardiya_id'], row['uretim_tarihi'], row['operator_id'], row['id'])
+                            st.success(f"{move_qty} adet {row['mevcut_asama']} aşamasından {p_yeni_asama} aşamasına taşındı.")
                             st.rerun()
 
 
@@ -1304,18 +1329,15 @@ elif menu == "🚚 Sevkiyat":
         default_index = 0
     
     s_kod = st.selectbox("Ürün", urun_ops, index=default_index, key="sev_urun")
+    asama_turkce = {"KALITE": "🏭 Kalite", "BUKUM": "📐 Büküm", "ISIL_ISLEM": "🔥 Isıl İşlem", "KAPLAMA": "🎨 Kaplama", "SEVK": "📦 Sevk"}
     
     lot_df = pd.read_sql_query("""
-        SELECT T.lot_no, T.miktar, T.asama
+        SELECT T.id, T.lot_no, T.miktar, T.asama, T.vardiya_id, T.uretim_tarihi, V.ad as vardiya_ad
         FROM LotAsamaTakip T
         JOIN Stoklar S ON S.id = T.stok_id
+        LEFT JOIN Vardiyalar V ON V.id = T.vardiya_id
         WHERE S.kod = ? AND T.miktar > 0
-        UNION ALL
-        SELECT L.lot_no, (L.miktar - COALESCE((SELECT SUM(miktar) FROM LotAsamaTakip WHERE stok_id=L.stok_id AND lot_no=L.lot_no), 0)) as miktar, 'KALITE' as asama
-        FROM LotStok L
-        JOIN Stoklar S ON S.id = L.stok_id
-        WHERE S.kod = ? AND (L.miktar - COALESCE((SELECT SUM(miktar) FROM LotAsamaTakip WHERE stok_id=L.stok_id AND lot_no=L.lot_no), 0)) > 0.001
-    """, conn, params=(s_kod, s_kod))
+    """, conn, params=(s_kod,))
     
     stok_row = cursor.execute("SELECT id, miktar FROM Stoklar WHERE kod=?", (s_kod,)).fetchone()
     if not stok_row:
@@ -1341,11 +1363,14 @@ elif menu == "🚚 Sevkiyat":
                 lot_miktar = 0.0
                 s_mik = st.number_input("Miktar", min_value=0.1, value=0.1, step=0.1, format="%.3f", disabled=True)
             else:
-                lot_ops = [f"{r['lot_no']} ({r['asama']}: {r['miktar']:.2f})" for _, r in uygun_lotlar.iterrows()]
-                s_lot_info = st.selectbox("Sevk Lot No", lot_ops)
-                s_lot = s_lot_info.split(" (")[0]
-                s_asama = s_lot_info.split(" (")[1].split(":")[0]
-                lot_miktar = float(uygun_lotlar[(uygun_lotlar['lot_no'] == s_lot) & (uygun_lotlar['asama'] == s_asama)]['miktar'].values[0])
+                lot_df['info'] = lot_df.apply(lambda r: f"{r['id']} | Lot: {r['lot_no']} | {asama_turkce.get(r['asama'], r['asama'])} | Miktar: {r['miktar']:.2f} | {r['uretim_tarihi'] or ''} {r['vardiya_ad'] or ''}", axis=1)
+                s_lot_selection = st.selectbox("Sevk Edilecek Batch", lot_df['info'].tolist())
+                sel_row = lot_df[lot_df['info'] == s_lot_selection].iloc[0]
+                
+                s_lot = sel_row['lot_no']
+                s_asama = sel_row['asama']
+                sel_row_id = int(sel_row['id'])
+                lot_miktar = float(sel_row['miktar'])
                 s_mik = st.number_input("Miktar", min_value=0.1, max_value=lot_miktar, value=min(1.0, lot_miktar), step=0.1, format="%.3f")
         else:
             st.warning("Bu ürün için sevk edilebilir lot yok. Önce lot bazlı stok girişi/üretim yapın.")
@@ -1363,8 +1388,8 @@ elif menu == "🚚 Sevkiyat":
                         cursor.execute("UPDATE LotStok SET miktar = miktar - ? WHERE stok_id=(SELECT id FROM Stoklar WHERE kod=?) AND lot_no=?", (s_mik, s_kod, s_lot))
                         cursor.execute("INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih) VALUES ((SELECT id FROM Stoklar WHERE kod=?),?,'SEVK',?,?)", (s_kod, s_mik, s_lot, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
                         
-                        # LotAsamaTakip'ten düş
-                        cursor.execute("UPDATE LotAsamaTakip SET miktar = miktar - ? WHERE stok_id=(SELECT id FROM Stoklar WHERE kod=?) AND lot_no=? AND asama=?", (s_mik, s_kod, s_lot, s_asama))
+                        # LotAsamaTakip'ten düş (Spesifik satırı ID ile düşür)
+                        cursor.execute("UPDATE LotAsamaTakip SET miktar = miktar - ? WHERE id=?", (s_mik, sel_row_id))
                         cursor.execute("DELETE FROM LotAsamaTakip WHERE miktar <= 0.001")
                         
                         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
