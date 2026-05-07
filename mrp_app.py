@@ -23,12 +23,13 @@ def get_available_lots_for_process(stok_kodu=None, mevcut_asama=None):
     # Tüm aşama takibi kayıtlarını getir (Vardiya, Tarih ve Operatör dahil)
     query_stages = """
         SELECT L.id, L.stok_id, S.kod as stok_kodu, S.ad as stok_adi, L.lot_no, L.asama, L.miktar, 
-               L.son_guncelleme, L.vardiya_id, L.uretim_tarihi, L.operator_id, 
-               V.ad as vardiya_ad, O.ad as operator_ad
+               L.son_guncelleme, L.vardiya_id, L.uretim_tarihi, L.operator_id, L.tezgah_id, 
+               V.ad as vardiya_ad, O.ad as operator_ad, T.kod as tezgah_kod
         FROM LotAsamaTakip L
         JOIN Stoklar S ON S.id = L.stok_id
         LEFT JOIN Vardiyalar V ON V.id = L.vardiya_id
         LEFT JOIN Operatorler O ON O.id = L.operator_id
+        LEFT JOIN Tezgahlar T ON T.id = L.tezgah_id
         WHERE L.miktar > 0
     """
     params = []
@@ -48,6 +49,8 @@ def get_available_lots_for_process(stok_kodu=None, mevcut_asama=None):
             prod_info += f" 🕒 {stage['vardiya_ad']}"
         if stage['operator_ad']:
             prod_info += f" 👤 {stage['operator_ad']}"
+        if stage['tezgah_kod']:
+            prod_info += f" ⚙️ {stage['tezgah_kod']}"
             
         results.append({
             'id': stage['id'],
@@ -61,7 +64,8 @@ def get_available_lots_for_process(stok_kodu=None, mevcut_asama=None):
             'uretim_bilgi': prod_info,
             'vardiya_id': stage['vardiya_id'],
             'uretim_tarihi': stage['uretim_tarihi'],
-            'operator_id': stage['operator_id']
+            'operator_id': stage['operator_id'],
+            'tezgah_id': stage['tezgah_id']
         })
             
     if not results:
@@ -74,7 +78,7 @@ def get_available_lots_for_process(stok_kodu=None, mevcut_asama=None):
     return df_final.sort_values(['stok_kodu', 'uretim_tarihi', 'vardiya_id', 'lot_no'], ascending=[True, False, False, True])
 
 
-def update_lot_asama_partial(stok_id, lot_no, current_asama, target_asama, amount, vardiya_id=None, u_tarih=None, op_id=None, row_id=None):
+def update_lot_asama_partial(stok_id, lot_no, current_asama, target_asama, amount, vardiya_id=None, u_tarih=None, op_id=None, row_id=None, tz_id=None):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     # 1. Mevcut aşamadan düşür (Eğer ID varsa doğrudan ID ile, yoksa kriterlerle)
@@ -108,6 +112,7 @@ def update_lot_asama_partial(stok_id, lot_no, current_asama, target_asama, amoun
     v_id = vardiya_id if not pd.isna(vardiya_id) else None
     u_dt = u_tarih if not pd.isna(u_tarih) else None
     o_id = op_id if not pd.isna(op_id) else None
+    t_id = tz_id if not pd.isna(tz_id) else None
     
     if v_id: sql_check += " AND vardiya_id=?"; params_check.append(v_id)
     else: sql_check += " AND vardiya_id IS NULL"
@@ -122,7 +127,7 @@ def update_lot_asama_partial(stok_id, lot_no, current_asama, target_asama, amoun
     if target_entry:
         cursor.execute("UPDATE LotAsamaTakip SET miktar=miktar+?, son_guncelleme=? WHERE id=?", (float(amount), now_str, target_entry[0]))
     else:
-        cursor.execute("INSERT INTO LotAsamaTakip (stok_id, lot_no, asama, miktar, son_guncelleme, vardiya_id, uretim_tarihi, operator_id) VALUES (?,?,?,?,?,?,?,?)", (stok_id, lot_no, target_asama, float(amount), now_str, v_id, u_dt, o_id))
+        cursor.execute("INSERT INTO LotAsamaTakip (stok_id, lot_no, asama, miktar, son_guncelleme, vardiya_id, uretim_tarihi, operator_id, tezgah_id) VALUES (?,?,?,?,?,?,?,?,?)", (stok_id, lot_no, target_asama, float(amount), now_str, v_id, u_dt, o_id, t_id))
     
     # 3. Geçmişe kaydet
     cursor.execute("INSERT INTO LotAsamaGecmis (stok_id, lot_no, asama, tarih, aciklama) VALUES (?,?,?,?,?)", (stok_id, lot_no, target_asama, now_str, f"{amount} adet: {current_asama} → {target_asama}"))
@@ -222,15 +227,15 @@ def init_db():
     asama_kolonlar = [c[1] for c in cursor.execute("PRAGMA table_info(LotAsamaTakip)").fetchall()]
     
     # Eğer UNIQUE kısıtlaması varsa veya yeni kolonlar eksikse tabloyu yeniden oluştur
-    if "UNIQUE" in asama_sql.upper() or "operator_id" not in asama_kolonlar:
+    if "UNIQUE" in asama_sql.upper() or "operator_id" not in asama_kolonlar or "tezgah_id" not in asama_kolonlar:
         try:
             cursor.execute("ALTER TABLE LotAsamaTakip RENAME TO LotAsamaTakip_old")
             cursor.execute('''CREATE TABLE LotAsamaTakip (
                 id INTEGER PRIMARY KEY, stok_id INTEGER, lot_no TEXT, asama TEXT, miktar REAL, son_guncelleme TEXT,
-                vardiya_id INTEGER, uretim_tarihi TEXT, operator_id INTEGER)''')
+                vardiya_id INTEGER, uretim_tarihi TEXT, operator_id INTEGER, tezgah_id INTEGER)''')
             
             # Eski kolonları dinamik olarak belirle ve verileri aktar
-            mig_cols = [c for c in ["stok_id", "lot_no", "asama", "miktar", "son_guncelleme", "vardiya_id", "uretim_tarihi", "operator_id"] if c in asama_kolonlar]
+            mig_cols = [c for c in ["stok_id", "lot_no", "asama", "miktar", "son_guncelleme", "vardiya_id", "uretim_tarihi", "operator_id", "tezgah_id"] if c in asama_kolonlar]
             col_list = ", ".join(mig_cols)
             cursor.execute(f"INSERT INTO LotAsamaTakip ({col_list}) SELECT {col_list} FROM LotAsamaTakip_old")
             
@@ -240,7 +245,7 @@ def init_db():
             # Tablo yoksa veya hata oluşursa normal oluştur
             cursor.execute('''CREATE TABLE IF NOT EXISTS LotAsamaTakip (
                 id INTEGER PRIMARY KEY, stok_id INTEGER, lot_no TEXT, asama TEXT, miktar REAL, son_guncelleme TEXT,
-                vardiya_id INTEGER, uretim_tarihi TEXT, operator_id INTEGER)''')
+                vardiya_id INTEGER, uretim_tarihi TEXT, operator_id INTEGER, tezgah_id INTEGER)''')
     
     # Stoklar tablosunu LotAsamaTakip ile senkronize et (Eski verilerdeki uyumsuzlukları gider)
     cursor.execute("""
@@ -691,11 +696,11 @@ elif menu == "🛠️ İş Emirleri":
                             cursor.execute("INSERT INTO LotStok (stok_id, lot_no, miktar) VALUES ((SELECT id FROM Stoklar WHERE kod=?),?,?) ON CONFLICT(stok_id, lot_no) DO UPDATE SET miktar = miktar + excluded.miktar", (row['kod'], row['lot_no'], float(p_miktar)))
                             cursor.execute("INSERT INTO Hareketler (stok_id, hareket_miktari, tip, lot_no, tarih) VALUES ((SELECT id FROM Stoklar WHERE kod=?),?,'URETIM',?,?)", (row['kod'], float(p_miktar), row['lot_no'], ts.strftime("%Y-%m-%d %H:%M:%S")))
                             
-                            # LotAsamaTakip'e KALITE olarak ekle (Vardiya, Tarih ve Operatör bazlı ayrıştırma için)
+                            # LotAsamaTakip'e KALITE olarak ekle (Vardiya, Tarih, Operatör ve Tezgah bazlı ayrıştırma için)
                             cursor.execute("""
-                                INSERT INTO LotAsamaTakip (stok_id, lot_no, asama, miktar, son_guncelleme, vardiya_id, uretim_tarihi, operator_id)
-                                VALUES ((SELECT id FROM Stoklar WHERE kod=?), ?, 'KALITE', ?, ?, ?, ?, ?)
-                            """, (row['kod'], row['lot_no'], float(p_miktar), ts.strftime("%Y-%m-%d %H:%M:%S"), vardiya_id, ts.strftime("%Y-%m-%d"), op_id))
+                                INSERT INTO LotAsamaTakip (stok_id, lot_no, asama, miktar, son_guncelleme, vardiya_id, uretim_tarihi, operator_id, tezgah_id)
+                                VALUES ((SELECT id FROM Stoklar WHERE kod=?), ?, 'KALITE', ?, ?, ?, ?, ?, ?)
+                            """, (row['kod'], row['lot_no'], float(p_miktar), ts.strftime("%Y-%m-%d %H:%M:%S"), vardiya_id, ts.strftime("%Y-%m-%d"), op_id, current_tezgah_id))
                             conn.commit()
                             st.success("Üretim kaydı eklendi.")
                             st.rerun()
@@ -1104,7 +1109,7 @@ elif menu == "🏭 Proses Takip":
                         
                         move_qty = st.number_input("Adet", min_value=0.001, max_value=float(row['miktar']), value=float(row['miktar']), key=f"qty_{row['id']}")
                         if st.button(f"➡️ İlerle", key=f"btn_{row['id']}"):
-                            update_lot_asama_partial(row['stok_id'], row['lot_no'], row['mevcut_asama'], p_yeni_asama, move_qty, row['vardiya_id'], row['uretim_tarihi'], row['operator_id'], row['id'])
+                            update_lot_asama_partial(row['stok_id'], row['lot_no'], row['mevcut_asama'], p_yeni_asama, move_qty, row['vardiya_id'], row['uretim_tarihi'], row['operator_id'], row['id'], row['tezgah_id'])
                             st.success(f"{move_qty} adet {row['mevcut_asama']} aşamasından {p_yeni_asama} aşamasına taşındı.")
                             st.rerun()
 
