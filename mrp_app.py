@@ -1472,49 +1472,85 @@ elif menu == "⚙️ Ayarlar & Yedek":
             st.write("Bu bölümde ürünlerin satırlarda, tezgahların sütunlarda olduğu matris formatındaki Excel dosyalarını yükleyebilirsiniz.")
             st.info("💡 İlk sütun **Ürün Kodları**, diğer sütun başlıkları ise **Tezgah Kodları** olmalıdır.")
             
-            uploaded_file = st.file_uploader("Excel Dosyası Seç (Matris Formatı)", type=["xlsx", "xls"])
+            # Kitap1.xlsx için hızlı yükleme butonu
+            desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+            kitap1_path = os.path.join(desktop_path, "MRP ÇALIŞMASI DOSYALAR", "Kitap1.xlsx")
+            
+            if os.path.exists(kitap1_path):
+                if st.button("📂 Kitap1.xlsx Dosyasından Otomatik Yükle"):
+                    try:
+                        df_upload = pd.read_excel(kitap1_path)
+                        st.session_state['import_df'] = df_upload
+                        st.success("Kitap1.xlsx başarıyla okundu.")
+                    except Exception as e:
+                        st.error(f"Dosya okuma hatası: {e}")
+            
+            uploaded_file = st.file_uploader("Veya Excel Dosyası Seç (Matris Formatı)", type=["xlsx", "xls"])
             if uploaded_file:
                 try:
                     df_upload = pd.read_excel(uploaded_file)
-                    if not df_upload.empty:
-                        st.write("📊 Yüklenen Dosya Önizleme (İlk 5 Satır):")
-                        st.dataframe(df_upload.head(), use_container_width=True)
-                        
-                        if st.button("🚀 Matris Verilerini İşle"):
-                            success_count = 0
-                            error_count = 0
-                            urun_col = df_upload.columns[0]
-                            tezgah_cols = df_upload.columns[1:]
-                            
-                            for _, row in df_upload.iterrows():
-                                u_kod = str(row[urun_col]).strip()
-                                # Ürün ID bul
-                                sid_row = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (u_kod,)).fetchone()
-                                if not sid_row:
-                                    error_count += len(tezgah_cols)
-                                    continue
-                                
-                                sid = sid_row[0]
-                                for t_kod in tezgah_cols:
-                                    val = row[t_kod]
-                                    if pd.notna(val):
-                                        try:
-                                            saniye = float(val)
-                                            # Tezgah ID bul
-                                            tid_row = cursor.execute("SELECT id FROM Tezgahlar WHERE kod=?", (str(t_kod).strip(),)).fetchone()
-                                            if tid_row:
-                                                cursor.execute("INSERT OR REPLACE INTO UrunTezgahVerim (stok_id, tezgah_id, saniye_adet) VALUES (?,?,?)", (sid, tid_row[0], saniye))
-                                                success_count += 1
-                                            else:
-                                                error_count += 1
-                                        except:
-                                            error_count += 1
-                            
-                            conn.commit()
-                            st.success(f"✅ İşlem tamamlandı! {success_count} çevrim süresi kaydedildi. {error_count} geçersiz veri veya eşleşmeyen kod atlandı.")
-                            st.rerun()
+                    st.session_state['import_df'] = df_upload
                 except Exception as e:
                     st.error(f"Hata: {e}")
+            
+            if 'import_df' in st.session_state:
+                df_upload = st.session_state['import_df']
+                st.write("📊 Yüklenen Dosya Önizleme (İlk 5 Satır):")
+                st.dataframe(df_upload.head(), use_container_width=True)
+                
+                if st.button("🚀 Matris Verilerini İşle"):
+                    success_count = 0
+                    error_count = 0
+                    added_stok = 0
+                    added_tezgah = 0
+                    
+                    urun_col = df_upload.columns[0]
+                    tezgah_cols = [c for c in df_upload.columns[1:] if "(boş)" not in str(c)]
+                    
+                    for _, row in df_upload.iterrows():
+                        u_kod = str(row[urun_col]).strip().upper()
+                        if not u_kod or u_kod == "NAN": continue
+                        
+                        # Ürün ID bul veya oluştur
+                        sid_row = cursor.execute("SELECT id FROM Stoklar WHERE kod=?", (u_kod,)).fetchone()
+                        if not sid_row:
+                            cursor.execute("INSERT INTO Stoklar (kod, ad, tip, birim) VALUES (?, ?, 'MAM', 'ADET')", (u_kod, f"Ürün {u_kod}"))
+                            sid = cursor.lastrowid
+                            added_stok += 1
+                        else:
+                            sid = sid_row[0]
+                        
+                        for t_kod in tezgah_cols:
+                            val = row[t_kod]
+                            if pd.notna(val) and str(val).strip() != "":
+                                try:
+                                    saniye = float(val)
+                                    if saniye <= 0: continue
+                                    
+                                    t_kod_str = str(t_kod).strip()
+                                    # Tezgah ID bul veya oluştur
+                                    tid_row = cursor.execute("SELECT id FROM Tezgahlar WHERE kod=?", (t_kod_str,)).fetchone()
+                                    if not tid_row:
+                                        cursor.execute("INSERT INTO Tezgahlar (kod, ad) VALUES (?, ?)", (t_kod_str, f"Tezgah {t_kod_str}"))
+                                        tid = cursor.lastrowid
+                                        added_tezgah += 1
+                                    else:
+                                        tid = tid_row[0]
+                                        
+                                    cursor.execute("INSERT OR REPLACE INTO UrunTezgahVerim (stok_id, tezgah_id, saniye_adet) VALUES (?,?,?)", (sid, tid, saniye))
+                                    success_count += 1
+                                except:
+                                    error_count += 1
+                    
+                    conn.commit()
+                    st.success(f"✅ İşlem tamamlandı!")
+                    st.write(f"📈 {success_count} çevrim süresi kaydedildi.")
+                    if added_stok > 0: st.info(f"🆕 {added_stok} yeni ürün kartı oluşturuldu.")
+                    if added_tezgah > 0: st.info(f"🆕 {added_tezgah} yeni tezgah tanımlandı.")
+                    if error_count > 0: st.warning(f"⚠️ {error_count} geçersiz veri atlandı.")
+                    
+                    if 'import_df' in st.session_state: del st.session_state['import_df']
+                    st.rerun()
 
         st.divider()
         
@@ -1543,6 +1579,9 @@ elif menu == "⚙️ Ayarlar & Yedek":
                     
         with c2:
             st.markdown("#### 📋 Tanımlı Süreler")
+            
+            search_cv = st.text_input("🔍 Ürün Koduna Göre Filtrele", key="search_cv_input").strip().upper()
+            
             cv_df = pd.read_sql_query("""
                 SELECT S.kod as urun, T.kod as tezgah, V.saniye_adet as saniye, S.id as sid, T.id as tid
                 FROM UrunTezgahVerim V
@@ -1550,18 +1589,26 @@ elif menu == "⚙️ Ayarlar & Yedek":
                 JOIN Tezgahlar T ON T.id = V.tezgah_id
                 ORDER BY S.kod, T.kod
             """, conn)
+            
             if cv_df.empty:
                 st.info("Henüz tanımlı çevrim süresi yok.")
             else:
+                if search_cv:
+                    cv_df = cv_df[cv_df['urun'].str.contains(search_cv, na=False)]
+                
                 st.dataframe(cv_df[['urun', 'tezgah', 'saniye']], use_container_width=True)
-                sil_cv_opts = cv_df.apply(lambda r: f"{r['sid']}-{r['tid']} | {r['urun']} @ {r['tezgah']}", axis=1).tolist()
-                sil_cv = st.selectbox("Silinecek Kayıt", sil_cv_opts)
-                if st.button("🗑️ Seçili Süreyi Sil"):
-                    sid_tid = sil_cv.split("|")[0].strip().split("-")
-                    cursor.execute("DELETE FROM UrunTezgahVerim WHERE stok_id=? AND tezgah_id=?", (int(sid_tid[0]), int(sid_tid[1])))
-                    conn.commit()
-                    st.success("Silindi.")
-                    st.rerun()
+                
+                if not cv_df.empty:
+                    sil_cv_opts = cv_df.apply(lambda r: f"{r['sid']}-{r['tid']} | {r['urun']} @ {r['tezgah']}", axis=1).tolist()
+                    sil_cv = st.selectbox("Silinecek Kayıt (Filtrelenmiş Listeden)", sil_cv_opts)
+                    if st.button("🗑️ Seçili Süreyi Sil"):
+                        sid_tid = sil_cv.split("|")[0].strip().split("-")
+                        cursor.execute("DELETE FROM UrunTezgahVerim WHERE stok_id=? AND tezgah_id=?", (int(sid_tid[0]), int(sid_tid[1])))
+                        conn.commit()
+                        st.success("Silindi.")
+                        st.rerun()
+                else:
+                    st.warning("Filtreye uygun kayıt bulunamadı.")
 
     with t3:
         st.write(f"**Uygulama Adı:** {sirket_adi}")
